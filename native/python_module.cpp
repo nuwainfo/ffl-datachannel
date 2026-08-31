@@ -351,6 +351,26 @@ PyObject *createAnswer(PyObject *, PyObject *args) {
     return createDescription(args, false);
 }
 
+PyObject *getLocalDescription(PyObject *, PyObject *args) {
+    PyObject *capsule = nullptr;
+    if (!PyArg_ParseTuple(args, "O", &capsule)) {
+        return nullptr;
+    }
+    PythonPeerBridge *bridge = getBridge(capsule);
+    if (!bridge) {
+        return nullptr;
+    }
+
+    try {
+        const std::string sdp = runWithoutGIL([bridge] {
+            return bridge->peer().getLocalDescription();
+        });
+        return PyUnicode_FromStringAndSize(sdp.data(), static_cast<Py_ssize_t>(sdp.size()));
+    } catch (...) {
+        return translateCurrentException();
+    }
+}
+
 PyObject *setLocalDescription(PyObject *, PyObject *args) {
     PyObject *capsule = nullptr;
     const char *type = nullptr;
@@ -626,6 +646,7 @@ PyMethodDef moduleMethods[] = {
     {"close_peer_connection", closePeerConnection, METH_VARARGS, nullptr},
     {"create_offer", createOffer, METH_VARARGS, nullptr},
     {"create_answer", createAnswer, METH_VARARGS, nullptr},
+    {"get_local_description", getLocalDescription, METH_VARARGS, nullptr},
     {"set_local_description", setLocalDescription, METH_VARARGS, nullptr},
     {"set_remote_description", setRemoteDescription, METH_VARARGS, nullptr},
     {"add_remote_candidate", addRemoteCandidate, METH_VARARGS, nullptr},

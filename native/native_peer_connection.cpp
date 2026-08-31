@@ -209,6 +209,10 @@ std::string NativePeerConnection::createAnswer() const {
     return createDescription(pc_, rtcCreateAnswer);
 }
 
+std::string NativePeerConnection::getLocalDescription() const {
+    return getString(pc_, rtcGetLocalDescription);
+}
+
 void NativePeerConnection::setLocalDescription(const std::string &type) const {
     requireSuccess("rtcSetLocalDescription", rtcSetLocalDescription(pc_, type.c_str()));
 }

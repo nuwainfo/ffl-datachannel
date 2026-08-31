@@ -25,8 +25,9 @@ import weakref
 from dataclasses import dataclass
 from typing import Any
 
+from pyee.asyncio import AsyncIOEventEmitter
+
 from . import _mdns
-from ._events import EventEmitter
 from ._native_backend import (
     NativeError,
     NativeEventType,
@@ -69,7 +70,7 @@ class _CompatibilitySctp:
     transport: _CompatibilityTransport
 
 
-class RTCPeerConnection(EventEmitter):
+class RTCPeerConnection(AsyncIOEventEmitter):
     _CONNECTION_STATES = {
         RTC_NEW: "new",
         RTC_CONNECTING: "connecting",
@@ -102,12 +103,13 @@ class RTCPeerConnection(EventEmitter):
 
     def __init__(self, configuration: RTCConfiguration | None = None):
         loop = asyncio.get_running_loop()
-        super().__init__(loop)
+        super().__init__()
         self._loop = loop
         self._configuration = configuration or RTCConfiguration()
         self._channels: dict[int, RTCDataChannel] = {}
         self._pendingChannelEvents: dict[int, list[tuple[NativeEventType, tuple[Any, ...]]]] = {}
         self._localDescriptionWaiter: asyncio.Future[RTCSessionDescription] | None = None
+        self._gatheringCompleteWaiter: asyncio.Future[None] | None = None
         self.localDescription: RTCSessionDescription | None = None
         self.remoteDescription: RTCSessionDescription | None = None
         self.connectionState = "new"
@@ -159,8 +161,18 @@ class RTCPeerConnection(EventEmitter):
         try:
             self._native.set_local_description(description.type)
             await waiter
+
+            # aiortc does not finish setLocalDescription() until ICE gathering
+            # has populated localDescription with all available candidates.
+            if self.iceGatheringState != "complete":
+                gatheringWaiter = self._loop.create_future()
+                self._gatheringCompleteWaiter = gatheringWaiter
+                await gatheringWaiter
+
+            self._refresh_local_description()
         finally:
             self._localDescriptionWaiter = None
+            self._gatheringCompleteWaiter = None
 
     async def setRemoteDescription(self, description: RTCSessionDescription) -> None:
         self._native.set_remote_description(description.sdp, description.type)
@@ -252,7 +264,9 @@ class RTCPeerConnection(EventEmitter):
         self.iceConnectionState = "closed"
         for channel in self._channels.values():
             channel._handle_closed()
-        self._emit_threadsafe("connectionstatechange")
+            
+        self.emit("connectionstatechange")
+        self.remove_all_listeners()
 
     @staticmethod
     def _coerce_candidate(candidate: RTCIceCandidate | dict[str, Any]) -> RTCIceCandidate:
@@ -296,27 +310,42 @@ class RTCPeerConnection(EventEmitter):
         if waiter is not None and not waiter.done():
             waiter.set_result(description)
 
+    def _refresh_local_description(self) -> None:
+        if self.localDescription is None:
+            return
+
+        self.localDescription = RTCSessionDescription(
+            sdp=self._native.get_local_description(),
+            type=self.localDescription.type,
+        )
+
     def _handle_local_candidate(self, candidate: str, mid: str) -> None:
         iceCandidate = RTCIceCandidate(candidate, sdpMid=mid or None, sdpMLineIndex=0)
-        self._emit_threadsafe("icecandidate", RTCIceCandidateEvent(iceCandidate))
+        self.emit("icecandidate", RTCIceCandidateEvent(iceCandidate))
 
     def _handle_connection_state(self, state: int) -> None:
         self.connectionState = self._CONNECTION_STATES[state]
-        self._emit_threadsafe("connectionstatechange")
+        self.emit("connectionstatechange")
 
     def _handle_ice_state(self, state: int) -> None:
         self.iceConnectionState = self._ICE_STATES[state]
-        self._emit_threadsafe("iceconnectionstatechange")
+        self.emit("iceconnectionstatechange")
 
     def _handle_gathering_state(self, state: int) -> None:
         self.iceGatheringState = self._GATHERING_STATES[state]
-        self._emit_threadsafe("icegatheringstatechange")
+        self.emit("icegatheringstatechange")
+        
         if state == RTC_GATHERING_COMPLETE:
-            self._emit_threadsafe("icecandidate", RTCIceCandidateEvent(None))
+            self._refresh_local_description()
+            waiter = self._gatheringCompleteWaiter
+            if waiter is not None and not waiter.done():
+                waiter.set_result(None)
+                
+            self.emit("icecandidate", RTCIceCandidateEvent(None))
 
     def _handle_signaling_state(self, state: int) -> None:
         self.signalingState = self._SIGNALING_STATES[state]
-        self._emit_threadsafe("signalingstatechange")
+        self.emit("signalingstatechange")
 
     def _handle_data_channel(
         self,
@@ -346,7 +375,7 @@ class RTCPeerConnection(EventEmitter):
             stream_id=streamId,
         )
         self._channels[channelId] = channel
-        self._emit_threadsafe("datachannel", channel)
+        self.emit("datachannel", channel)
 
         pendingEvents = self._pendingChannelEvents.pop(channelId, ())
         for eventType, payload in pendingEvents:

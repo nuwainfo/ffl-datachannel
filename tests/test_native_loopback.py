@@ -28,6 +28,29 @@ pytestmark = pytest.mark.native
 
 
 @pytest.mark.asyncio
+async def test_set_local_description_waits_for_candidates_and_exposes_them_in_sdp():
+    peer = RTCPeerConnection()
+    peer.createDataChannel("gathering-check")
+    candidates = []
+
+    @peer.on("icecandidate")
+    def local_candidate(event):
+        if event.candidate is not None:
+            candidates.append(event.candidate)
+
+    try:
+        offer = await peer.createOffer()
+        await asyncio.wait_for(peer.setLocalDescription(offer), timeout=10)
+
+        assert peer.iceGatheringState == "complete"
+        assert candidates
+        assert peer.localDescription is not None
+        assert "a=candidate:" in peer.localDescription.sdp
+    finally:
+        await peer.close()
+
+
+@pytest.mark.asyncio
 async def test_native_ping_pong():
     peerA = RTCPeerConnection()
     peerB = RTCPeerConnection()

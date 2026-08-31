@@ -58,6 +58,9 @@ class NativePeerConnection:
     def create_answer(self) -> str:
         return native.create_answer(self._handle)
 
+    def get_local_description(self) -> str:
+        return native.get_local_description(self._handle)
+
     def set_local_description(self, description_type: str) -> None:
         native.set_local_description(self._handle, description_type)
 

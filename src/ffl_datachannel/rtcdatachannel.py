@@ -21,13 +21,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ._events import EventEmitter
+from pyee.asyncio import AsyncIOEventEmitter
 
 if TYPE_CHECKING:
     from .rtcpeerconnection import RTCPeerConnection
 
 
-class RTCDataChannel(EventEmitter):
+class RTCDataChannel(AsyncIOEventEmitter):
     def __init__(
         self,
         peer_connection: RTCPeerConnection,
@@ -41,7 +41,7 @@ class RTCDataChannel(EventEmitter):
         max_retransmits: int | None = None,
         stream_id: int | None = None,
     ):
-        super().__init__(peer_connection._loop)
+        super().__init__()
         self._peer_connection = peer_connection
         self._channel_id = channel_id
         self._stream_id = stream_id
@@ -114,20 +114,21 @@ class RTCDataChannel(EventEmitter):
             self._stream_id = self._peer_connection._native.get_data_channel_stream(self._channel_id)
 
         self._ready_state = "open"
-        self._emit_threadsafe("open")
+        self.emit("open")
 
     def _handle_closed(self) -> None:
         if self._ready_state == "closed":
             return
 
         self._ready_state = "closed"
-        self._emit_threadsafe("close")
+        self.emit("close")
+        self.remove_all_listeners()
 
     def _handle_error(self, message: str) -> None:
-        self._emit_threadsafe("error", RuntimeError(message))
+        self.emit("error", RuntimeError(message))
 
     def _handle_message(self, data: str | bytes) -> None:
-        self._emit_threadsafe("message", data)
+        self.emit("message", data)
 
     @staticmethod
     def _data_size(data: str | bytes | bytearray | memoryview) -> int:
@@ -160,7 +161,7 @@ class RTCDataChannel(EventEmitter):
             previous > self._buffered_amount_low_threshold
             and amount <= self._buffered_amount_low_threshold
         ):
-            self._emit_threadsafe("bufferedamountlow")
+            self.emit("bufferedamountlow")
 
     def _reconcile_buffered_amount(self) -> None:
         self._buffered_amount_reconcile_scheduled = False

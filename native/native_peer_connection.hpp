@@ -53,6 +53,7 @@ public:
 
     std::string createOffer() const;
     std::string createAnswer() const;
+    std::string getLocalDescription() const;
     void setLocalDescription(const std::string &type) const;
     void setRemoteDescription(const std::string &sdp, const std::string &type) const;
     void addRemoteCandidate(const std::string &candidate, const std::string &mid) const;

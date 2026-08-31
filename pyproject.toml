@@ -4,11 +4,14 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "ffl-datachannel"
-version = "0.1.0"
+version = "0.2.1"
 description = "aiortc-compatible WebRTC DataChannel subset backed by statically linked libdatachannel and Mbed TLS"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{name = "FastFileLink"}]
+dependencies = [
+    "pyee>=13.0.0",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Framework :: AsyncIO",

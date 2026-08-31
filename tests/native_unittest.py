@@ -25,7 +25,6 @@ import unittest
 
 from ffl_datachannel import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
 from ffl_datachannel import _ffl_datachannel as native
-from ffl_datachannel._events import EventEmitter
 from ffl_datachannel.sdp import RTCIceCandidate, candidate_from_sdp, candidate_to_sdp
 
 
@@ -71,30 +70,6 @@ class CompatibilityTest(unittest.TestCase):
             self.assertIn(parameterName, channelSignature.parameters)
         self.assertEqual("v=0", description.sdp)
         self.assertEqual("offer", description.type)
-
-
-class EventEmitterTest(unittest.IsolatedAsyncioTestCase):
-    async def testDecoratorAndDirectHandlersShareOneDispatchPath(self):
-        eventEmitter = EventEmitter(asyncio.get_running_loop())
-        values = []
-        done = asyncio.Event()
-
-        @eventEmitter.on("value")
-        async def handleAsyncValue(value):
-            values.append(("async", value))
-            if len(values) == 2:
-                done.set()
-
-        def handleSyncValue(value):
-            values.append(("sync", value))
-            if len(values) == 2:
-                done.set()
-
-        eventEmitter.on("value", handleSyncValue)
-        eventEmitter._emit_threadsafe("value", 7)
-        await asyncio.wait_for(done.wait(), timeout=1)
-
-        self.assertEqual([("async", 7), ("sync", 7)], sorted(values))
 
 
 class NativeLoopbackTest(unittest.IsolatedAsyncioTestCase):
@@ -151,8 +126,11 @@ class NativeLoopbackTest(unittest.IsolatedAsyncioTestCase):
             channelA.bufferedAmountLowThreshold = 0
             channelA.send(b"x" * (256 * 1024))
 
-            self.assertEqual(0, channelA.bufferedAmount)
+            # send() exposes the compatibility counter synchronously; the
+            # native direct-send path drains it on a later event-loop turn.
+            self.assertEqual(256 * 1024, channelA.bufferedAmount)
             await asyncio.wait_for(bufferDrained.wait(), timeout=10)
+            self.assertEqual(0, channelA.bufferedAmount)
         finally:
             await peerA.close()
             await peerB.close()

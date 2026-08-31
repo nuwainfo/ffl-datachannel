@@ -1,0 +1,8 @@
+/build/
+/dist/
+/out/
+/third_party/
+*.egg-info/
+__pycache__/
+.pytest_cache/
+*.pyc

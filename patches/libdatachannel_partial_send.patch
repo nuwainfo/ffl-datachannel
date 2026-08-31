@@ -1,0 +1,197 @@
+diff --git a/src/impl/sctptransport.cpp b/src/impl/sctptransport.cpp
+index 552ee94..d4cc539 100644
+--- a/src/impl/sctptransport.cpp
++++ b/src/impl/sctptransport.cpp
+@@ -218,6 +218,15 @@ SctpTransport::SctpTransport(shared_ptr<Transport> lower, const Configuration &c
+ 		throw std::runtime_error("Could not set socket option SCTP_NODELAY, errno=" +
+ 		                         std::to_string(errno));
+ 
++	// Allow a non-blocking sendv() to accept only a prefix of a DataChannel user
++	// message. SCTP_EOR remains explicit on every send below; the send queue keeps
++	// the unfinished suffix at its head until the complete message is accepted.
++	int explicitEor = 1;
++	if (usrsctp_setsockopt(mSock, IPPROTO_SCTP, SCTP_EXPLICIT_EOR, &explicitEor,
++	                       sizeof(explicitEor)))
++		throw std::runtime_error("Could not set socket option SCTP_EXPLICIT_EOR, errno=" +
++		                         std::to_string(errno));
++
+ 	struct sctp_paddrparams spp = {};
+ 	// Enable SCTP heartbeats
+ 	spp.spp_flags = SPP_HB_ENABLE;
+@@ -384,12 +393,29 @@ bool SctpTransport::send(message_ptr message) {
+ 	if (message->size() > mMaxMessageSize)
+ 		throw std::invalid_argument("Message is too large");
+ 
+-	// Flush the queue, and if nothing is pending, try to send directly
+-	if (trySendQueue() && trySendMessage(message))
++	// Flush the queue, and if nothing is pending, try to send directly. With
++	// SCTP_EXPLICIT_EOR, a positive short write is normal: queue the original
++	// complete Message and remember only the number of bytes already accepted.
++	size_t directOffset = 0;
++	const bool queueEmpty = trySendQueue();
++	if (queueEmpty && trySendMessage(message, directOffset))
+ 		return true;
+ 
++	const uint16_t streamId = to_uint16(message->stream);
++	const size_t size = message_size_func(message);
+ 	mSendQueue.push(message);
+-	updateBufferedAmount(to_uint16(message->stream), ptrdiff_t(message_size_func(message)));
++
++	if (queueEmpty) {
++		if (directOffset > size)
++			throw std::logic_error("SCTP send offset exceeds message size");
++		mSendQueueOffset = directOffset;
++		updateBufferedAmount(streamId, ptrdiff_t(size - directOffset));
++	} else {
++		// mSendQueueOffset belongs to the older queue head. This newly queued
++		// message therefore contributes its full size to bufferedAmount.
++		updateBufferedAmount(streamId, ptrdiff_t(size));
++	}
++
+ 	return false;
+ }
+ 
+@@ -573,11 +599,21 @@ bool SctpTransport::trySendQueue() {
+ 	// Requires mSendMutex to be locked
+ 	while (auto next = mSendQueue.peek()) {
+ 		message_ptr message = std::move(*next);
+-		if (!trySendMessage(message))
++		const size_t previousOffset = mSendQueueOffset;
++
++		if (!trySendMessage(message, mSendQueueOffset)) {
++			if (mSendQueueOffset > previousOffset)
++				updateBufferedAmount(to_uint16(message->stream),
++				                     -ptrdiff_t(mSendQueueOffset - previousOffset));
+ 			return false;
++		}
+ 
++		if (mSendQueueOffset > previousOffset)
++			updateBufferedAmount(to_uint16(message->stream),
++			                     -ptrdiff_t(mSendQueueOffset - previousOffset));
++
++		mSendQueueOffset = 0;
+ 		mSendQueue.pop();
+-		updateBufferedAmount(to_uint16(message->stream), -ptrdiff_t(message_size_func(message)));
+ 	}
+ 
+ 	if (!mSendQueue.running() && !std::exchange(mSendShutdown, true)) {
+@@ -596,11 +632,14 @@ bool SctpTransport::trySendQueue() {
+ 	return true;
+ }
+ 
+-bool SctpTransport::trySendMessage(message_ptr message) {
++bool SctpTransport::trySendMessage(message_ptr message, size_t &offset) {
+ 	// Requires mSendMutex to be locked
+ 	if (state() != State::Connected)
+ 		return false;
+ 
++	if (offset > message->size())
++		throw std::logic_error("SCTP send offset exceeds message size");
++
+ 	uint32_t ppid;
+ 	switch (message->type) {
+ 	case Message::String:
+@@ -613,6 +652,8 @@ bool SctpTransport::trySendMessage(message_ptr message) {
+ 		ppid = PPID_CONTROL;
+ 		break;
+ 	case Message::Reset:
++		if (offset != 0)
++			throw std::logic_error("SCTP reset message cannot have a partial-send offset");
+ 		sendReset(uint16_t(message->stream));
+ 		return true;
+ 	default:
+@@ -620,7 +661,7 @@ bool SctpTransport::trySendMessage(message_ptr message) {
+ 		return true;
+ 	}
+ 
+-	PLOG_VERBOSE << "SCTP try send size=" << message->size();
++	PLOG_VERBOSE << "SCTP try send size=" << message->size() << ", offset=" << offset;
+ 
+ 	// TODO: Implement SCTP ndata specification draft when supported everywhere
+ 	// See https://datatracker.ietf.org/doc/html/draft-ietf-tsvwg-sctp-ndata-08
+@@ -633,7 +674,10 @@ bool SctpTransport::trySendMessage(message_ptr message) {
+ 	spa.sendv_flags |= SCTP_SEND_SNDINFO_VALID;
+ 	spa.sendv_sndinfo.snd_sid = uint16_t(message->stream);
+ 	spa.sendv_sndinfo.snd_ppid = htonl(ppid);
+-	spa.sendv_sndinfo.snd_flags |= SCTP_EOR; // implicit here
++	// SCTP_EXPLICIT_EOR makes record completion explicit. A short positive
++	// return means only a prefix was accepted; retry the suffix with identical
++	// stream / PPID / reliability metadata and SCTP_EOR.
++	spa.sendv_sndinfo.snd_flags |= SCTP_EOR;
+ 
+ 	// set prinfo
+ 	spa.sendv_flags |= SCTP_SEND_PRINFO_VALID;
+@@ -671,15 +715,18 @@ bool SctpTransport::trySendMessage(message_ptr message) {
+ 
+ 	ssize_t ret;
+ 	if (!message->empty()) {
+-		ret = usrsctp_sendv(mSock, message->data(), message->size(), nullptr, 0, &spa, sizeof(spa),
+-		                    SCTP_SENDV_SPA, 0);
++		const size_t remaining = message->size() - offset;
++		ret = usrsctp_sendv(mSock, message->data() + offset, remaining, nullptr, 0, &spa,
++		                    sizeof(spa), SCTP_SENDV_SPA, 0);
+ 	} else {
++		if (offset != 0)
++			throw std::logic_error("Empty SCTP message cannot have a partial-send offset");
+ 		const char zero = 0;
+ 		ret = usrsctp_sendv(mSock, &zero, 1, nullptr, 0, &spa, sizeof(spa), SCTP_SENDV_SPA, 0);
+ 	}
+ 
+ 	if (ret < 0) {
+-		if (errno == EWOULDBLOCK || errno == EAGAIN) {
++		if (errno == EWOULDBLOCK || errno == EAGAIN || errno == ENOBUFS) {
+ 			PLOG_VERBOSE << "SCTP sending not possible";
+ 			return false;
+ 		}
+@@ -688,6 +735,26 @@ bool SctpTransport::trySendMessage(message_ptr message) {
+ 		throw std::runtime_error("Sending failed, errno=" + std::to_string(errno));
+ 	}
+ 
++	if (!message->empty()) {
++		const size_t remaining = message->size() - offset;
++		const size_t accepted = size_t(ret);
++
++		if (accepted > remaining)
++			throw std::logic_error("usrsctp accepted more bytes than requested");
++
++		// A zero-byte non-error return made no progress. Treat it as backpressure
++		// rather than spinning in the flush loop.
++		if (accepted == 0)
++			return false;
++
++		offset += accepted;
++		if (offset < message->size()) {
++			PLOG_VERBOSE << "SCTP partial send accepted=" << accepted
++			             << ", remaining=" << (message->size() - offset);
++			return false;
++		}
++	}
++
+ 	PLOG_VERBOSE << "SCTP sent size=" << message->size();
+ 	if (message->type == Message::Binary || message->type == Message::String)
+ 		mBytesSent += message->size();
+diff --git a/src/impl/sctptransport.hpp b/src/impl/sctptransport.hpp
+index 769b505..3614ee8 100644
+--- a/src/impl/sctptransport.hpp
++++ b/src/impl/sctptransport.hpp
+@@ -85,7 +85,7 @@ private:
+ 	void enqueueRecv();
+ 	void enqueueFlush();
+ 	bool trySendQueue();
+-	bool trySendMessage(message_ptr message);
++	bool trySendMessage(message_ptr message, size_t &offset);
+ 	void updateBufferedAmount(uint16_t streamId, ptrdiff_t delta);
+ 	void triggerBufferedAmount(uint16_t streamId, size_t amount);
+ 	void sendReset(uint16_t streamId);
+@@ -107,6 +107,11 @@ private:
+ 	std::mutex mRecvMutex;
+ 	std::recursive_mutex mSendMutex; // buffered amount callback is synchronous
+ 	Queue<message_ptr> mSendQueue;
++	// User payload bytes already accepted by usrsctp for the current queue head.
++	// With SCTP_EXPLICIT_EOR, a non-blocking send may accept only a prefix of one
++	// DataChannel message. Keep the complete Message pinned at the head and store
++	// continuation progress separately so the next message can never overtake it.
++	size_t mSendQueueOffset = 0;
+ 	bool mSendShutdown = false;
+ 	std::map<uint16_t, size_t> mBufferedAmount;
+ 	amount_callback mBufferedAmountCallback;

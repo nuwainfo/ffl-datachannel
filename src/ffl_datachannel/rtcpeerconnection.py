@@ -60,6 +60,9 @@ from .rtcsessiondescription import RTCSessionDescription
 from .sdp import RTCIceCandidate, RTCIceCandidateEvent
 
 
+_INITIAL_ICE_CANDIDATE_TIMEOUT = 1.0
+
+
 @dataclass(slots=True)
 class _CompatibilityTransport:
     _browser_hint: str | None = None
@@ -109,7 +112,9 @@ class RTCPeerConnection(AsyncIOEventEmitter):
         self._channels: dict[int, RTCDataChannel] = {}
         self._pendingChannelEvents: dict[int, list[tuple[NativeEventType, tuple[Any, ...]]]] = {}
         self._localDescriptionWaiter: asyncio.Future[RTCSessionDescription] | None = None
-        self._gatheringCompleteWaiter: asyncio.Future[None] | None = None
+        self._initialCandidateWaiter: asyncio.Future[None] | None = None
+        self._hasLocalCandidate = False
+        self._closed = False
         self.localDescription: RTCSessionDescription | None = None
         self.remoteDescription: RTCSessionDescription | None = None
         self.connectionState = "new"
@@ -158,21 +163,31 @@ class RTCPeerConnection(AsyncIOEventEmitter):
 
         waiter = self._loop.create_future()
         self._localDescriptionWaiter = waiter
+        self._hasLocalCandidate = False
         try:
             self._native.set_local_description(description.type)
             await waiter
 
-            # aiortc does not finish setLocalDescription() until ICE gathering
-            # has populated localDescription with all available candidates.
-            if self.iceGatheringState != "complete":
-                gatheringWaiter = self._loop.create_future()
-                self._gatheringCompleteWaiter = gatheringWaiter
-                await gatheringWaiter
+            # libdatachannel emits the initial local description before ICE
+            # candidates are appended to its SDP. Wait for an initial candidate
+            # (or gathering completion), but do not hold application signalling
+            # hostage to a slow STUN/TURN server. Subsequent candidates continue
+            # through the normal trickle-ICE event path.
+            if not self._hasLocalCandidate and self.iceGatheringState != "complete":
+                initialCandidateWaiter = self._loop.create_future()
+                self._initialCandidateWaiter = initialCandidateWaiter
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(initialCandidateWaiter),
+                        timeout=_INITIAL_ICE_CANDIDATE_TIMEOUT,
+                    )
+                except TimeoutError:
+                    pass
 
             self._refresh_local_description()
         finally:
             self._localDescriptionWaiter = None
-            self._gatheringCompleteWaiter = None
+            self._initialCandidateWaiter = None
 
     async def setRemoteDescription(self, description: RTCSessionDescription) -> None:
         self._native.set_remote_description(description.sdp, description.type)
@@ -259,6 +274,7 @@ class RTCPeerConnection(AsyncIOEventEmitter):
     async def close(self) -> None:
         if self.connectionState == "closed":
             return
+        self._closed = True
         self._native.close()
         self.connectionState = "closed"
         self.iceConnectionState = "closed"
@@ -288,6 +304,9 @@ class RTCPeerConnection(AsyncIOEventEmitter):
         self._loop.call_soon_threadsafe(self._dispatch_native_event, NativeEventType(event_type), payload)
 
     def _dispatch_native_event(self, eventType: NativeEventType, payload: tuple[Any, ...]) -> None:
+        if getattr(self, "_closed", False):
+            return
+
         if eventType in (
             NativeEventType.CHANNEL_OPEN,
             NativeEventType.CHANNEL_CLOSED,
@@ -320,6 +339,11 @@ class RTCPeerConnection(AsyncIOEventEmitter):
         )
 
     def _handle_local_candidate(self, candidate: str, mid: str) -> None:
+        self._hasLocalCandidate = True
+        self._refresh_local_description()
+        waiter = self._initialCandidateWaiter
+        if waiter is not None and not waiter.done():
+            waiter.set_result(None)
         iceCandidate = RTCIceCandidate(candidate, sdpMid=mid or None, sdpMLineIndex=0)
         self.emit("icecandidate", RTCIceCandidateEvent(iceCandidate))
 
@@ -337,7 +361,7 @@ class RTCPeerConnection(AsyncIOEventEmitter):
         
         if state == RTC_GATHERING_COMPLETE:
             self._refresh_local_description()
-            waiter = self._gatheringCompleteWaiter
+            waiter = self._initialCandidateWaiter
             if waiter is not None and not waiter.done():
                 waiter.set_result(None)
                 

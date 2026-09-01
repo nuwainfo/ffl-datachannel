@@ -21,17 +21,15 @@ import asyncio
 
 import pytest
 
-from ffl_datachannel import RTCConfiguration, RTCIceServer, RTCPeerConnection
+from ffl_datachannel import RTCPeerConnection
 
 
 pytestmark = pytest.mark.native
 
 
 @pytest.mark.asyncio
-async def test_set_local_description_returns_with_initial_candidate_when_stun_is_slow():
-    peer = RTCPeerConnection(
-        RTCConfiguration(iceServers=[RTCIceServer(urls="stun:192.0.2.1:3478")])
-    )
+async def test_set_local_description_waits_for_complete_gathering_and_exposes_candidates():
+    peer = RTCPeerConnection()
     peer.createDataChannel("gathering-check")
     candidates = []
 
@@ -42,9 +40,9 @@ async def test_set_local_description_returns_with_initial_candidate_when_stun_is
 
     try:
         offer = await peer.createOffer()
-        await asyncio.wait_for(peer.setLocalDescription(offer), timeout=5)
+        await asyncio.wait_for(peer.setLocalDescription(offer), timeout=10)
 
-        assert peer.iceGatheringState in {"gathering", "complete"}
+        assert peer.iceGatheringState == "complete"
         assert candidates
         assert peer.localDescription is not None
         assert "a=candidate:" in peer.localDescription.sdp

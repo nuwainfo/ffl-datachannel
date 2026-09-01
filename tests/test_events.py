@@ -70,6 +70,7 @@ async def test_native_events_are_emitted_on_the_owning_event_loop():
     peer = object.__new__(RTCPeerConnection)
     AsyncIOEventEmitter.__init__(peer)
     peer._loop = loop
+    peer._closed = False
     peer._eventHandlers = {
         NativeEventType.CONNECTION_STATE: peer._handle_connection_state,
     }

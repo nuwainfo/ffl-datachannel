@@ -20,9 +20,9 @@
 from ffl_datachannel import RTCConfiguration, RTCIceServer
 
 
-def test_stun_urls_are_preserved():
+def test_native_urls_match_aiortc_single_stun_server_selection():
     config = RTCConfiguration(iceServers=[RTCIceServer(urls=["stun:a.example", "stun:b.example"])])
-    assert config._native_urls() == ["stun:a.example", "stun:b.example"]
+    assert config._native_urls() == ["stun:a.example"]
 
 
 def test_turn_credentials_are_encoded_into_native_uri():

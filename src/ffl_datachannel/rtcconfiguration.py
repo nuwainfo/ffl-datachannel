@@ -64,7 +64,23 @@ class RTCConfiguration:
 
     def _native_urls(self) -> list[str]:
         native_urls: list[str] = []
+        has_stun_server = False
+        has_turn_server = False
+        
         for ice_server in self.iceServers:
-            native_urls.extend(ice_server._native_urls())
+            for url in ice_server._native_urls():
+                scheme = url.split(":", 1)[0].lower()
+                if scheme == "stun":
+                    if has_stun_server:
+                        continue
+                        
+                    has_stun_server = True
+                elif scheme in {"turn", "turns"}:
+                    if has_turn_server:
+                        continue
+                        
+                    has_turn_server = True
+                    
+                native_urls.append(url)
 
         return native_urls

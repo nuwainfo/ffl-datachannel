@@ -55,7 +55,7 @@ class CompatibilityTest(unittest.TestCase):
             credentialType="password",
         )
 
-        self.assertEqual(["stun:a.example", "stun:b.example"], configuration._native_urls())
+        self.assertEqual(["stun:a.example"], configuration._native_urls())
         self.assertEqual(["turn:a%3Ab:c%40d@relay.example:3478"], turnServer._native_urls())
         with self.assertRaises(ValueError):
             RTCIceServer(urls="turn:relay.example:3478", credentialType="token")

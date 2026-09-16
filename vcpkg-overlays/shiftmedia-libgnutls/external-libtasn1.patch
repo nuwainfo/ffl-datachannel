@@ -1,0 +1,28 @@
+diff --git a/SMP/libgnutls_files.props b/SMP/libgnutls_files.props
+index 55049b70b..2bb76e3b0 100644
+--- a/SMP/libgnutls_files.props
++++ b/SMP/libgnutls_files.props
+@@ -175,13 +175,6 @@
+   <ItemGroup>
+     <ClCompile Include="lib\gnutls_asn1_tab.c" />
+     <ClCompile Include="lib\pkix_asn1_tab.c" />
+-    <ClCompile Include="..\devel\libtasn1\lib\coding.c" />
+-    <ClCompile Include="..\devel\libtasn1\lib\decoding.c" />
+-    <ClCompile Include="..\devel\libtasn1\lib\element.c" />
+-    <ClCompile Include="..\devel\libtasn1\lib\gstr.c" />
+-    <ClCompile Include="..\devel\libtasn1\lib\parser_aux.c" />
+-    <ClCompile Include="..\devel\libtasn1\lib\structure.c" />
+-    <ClCompile Include="..\devel\libtasn1\lib\version.c" />
+     <ClCompile Include="..\gnulib\lib\c-strcasecmp.c" />
+     <ClCompile Include="..\gnulib\lib\c-strncasecmp.c" />
+     <ClCompile Include="..\gnulib\lib\cloexec.c" />
+@@ -545,9 +538,6 @@
+     </ClCompile>	
+     <ClCompile Include="..\gnulib\lib\stdio-write.c">
+       <PreprocessorDefinitions>REPLACE_PRINTF_POSIX=1;REPLACE_FPRINTF_POSIX=1;REPLACE_VPRINTF_POSIX=1;REPLACE_VFPRINTF_POSIX=1;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+-    </ClCompile>	
+-    <ClCompile Include="..\devel\libtasn1\lib\errors.c">
+-      <ObjectFileName>$(IntDir)\tasn1_$(filename).obj</ObjectFileName>
+     </ClCompile>
+     <ClCompile Include="..\lib\algorithms\ecc.c">
+       <ObjectFileName>$(IntDir)\alg_%(Filename).obj</ObjectFileName>

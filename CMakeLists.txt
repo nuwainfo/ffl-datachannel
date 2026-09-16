@@ -19,15 +19,49 @@ if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libdatachannel/CMakeLists
     message(FATAL_ERROR "third_party/libdatachannel is missing; run python scripts/bootstrap.py")
 endif()
 
-find_package(MbedTLS 3 REQUIRED)
-if(NOT TARGET MbedTLS::MbedTLS)
-    add_library(MbedTLS::MbedTLS ALIAS MbedTLS::mbedtls)
+# GnuTLS has no CMake package of its own; resolve it (and, on Windows, its
+# full static transitive closure: Nettle, GMP, libtasn1, zlib) through
+# pkg-config, matching the validated ffl-p2p GnuTLS toolchain. Force the
+# result into GNUTLS_INCLUDE_DIR/GNUTLS_LIBRARY cache variables before
+# find_package(GnuTLS) runs so both this call and libdatachannel's own
+# find_package(GnuTLS REQUIRED) (invoked later, inside add_subdirectory)
+# resolve to the same installation instead of searching again.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GNUTLS REQUIRED gnutls>=3.8)
+find_path(FFL_DATACHANNEL_GNUTLS_INCLUDE_DIR gnutls/gnutls.h
+    PATHS ${GNUTLS_INCLUDE_DIRS} NO_DEFAULT_PATH)
+find_library(FFL_DATACHANNEL_GNUTLS_LIBRARY NAMES gnutls
+    PATHS ${GNUTLS_LIBRARY_DIRS} NO_DEFAULT_PATH)
+if(NOT FFL_DATACHANNEL_GNUTLS_INCLUDE_DIR OR NOT FFL_DATACHANNEL_GNUTLS_LIBRARY)
+    message(FATAL_ERROR "pkg-config located GnuTLS but not its headers or library")
+endif()
+set(GNUTLS_INCLUDE_DIR "${FFL_DATACHANNEL_GNUTLS_INCLUDE_DIR}" CACHE PATH "" FORCE)
+set(GNUTLS_LIBRARY "${FFL_DATACHANNEL_GNUTLS_LIBRARY}" CACHE FILEPATH "" FORCE)
+find_package(GnuTLS 3.8 REQUIRED)
+
+if(WIN32)
+    # vcpkg supplies a static GnuTLS on Windows. MSVC does not load a static
+    # library's own dependencies, so link its full pkg-config closure
+    # (Nettle, GMP, libtasn1, zlib, and the Windows CNG/socket libraries)
+    # directly onto the extension.
+    set(FFL_DATACHANNEL_GNUTLS_LIBRARIES ${GNUTLS_STATIC_LIBRARIES})
+    set(FFL_DATACHANNEL_GNUTLS_LINK_DIRECTORIES ${GNUTLS_STATIC_LIBRARY_DIRS})
+else()
+    # System GnuTLS (apt/Homebrew) ships as a shared library that owns its
+    # own transitive dependencies, so link only libgnutls itself.
+    set(FFL_DATACHANNEL_GNUTLS_LIBRARIES ${GNUTLS_LIBRARIES})
+    set(FFL_DATACHANNEL_GNUTLS_LINK_DIRECTORIES ${GNUTLS_LIBRARY_DIRS})
 endif()
 
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_DEPS_LIBS OFF CACHE BOOL "" FORCE)
-set(USE_MBEDTLS ON CACHE BOOL "" FORCE)
-set(USE_GNUTLS OFF CACHE BOOL "" FORCE)
+set(USE_MBEDTLS OFF CACHE BOOL "" FORCE)
+set(USE_GNUTLS ON CACHE BOOL "" FORCE)
+# libdatachannel defaults this to ON alongside USE_GNUTLS so libjuice can
+# reuse GnuTLS's Nettle for hashing. Keep libjuice's own hash functions
+# instead, so Nettle stays purely GnuTLS's internal dependency rather than a
+# second, independently-resolved requirement of this project.
+set(USE_NETTLE OFF CACHE BOOL "" FORCE)
 set(USE_NICE OFF CACHE BOOL "" FORCE)
 set(PREFER_SYSTEM_LIB OFF CACHE BOOL "" FORCE)
 set(USE_SYSTEM_JUICE OFF CACHE BOOL "" FORCE)
@@ -54,6 +88,8 @@ Python_add_library(_ffl_datachannel MODULE WITH_SOABI
 target_include_directories(_ffl_datachannel PRIVATE native)
 target_compile_definitions(_ffl_datachannel PRIVATE RTC_STATIC=1)
 target_link_libraries(_ffl_datachannel PRIVATE ffl_datachannel_native_core)
+target_link_directories(_ffl_datachannel PRIVATE ${FFL_DATACHANNEL_GNUTLS_LINK_DIRECTORIES})
+target_link_libraries(_ffl_datachannel PRIVATE ${FFL_DATACHANNEL_GNUTLS_LIBRARIES})
 
 if(MSVC)
     target_compile_options(ffl_datachannel_native_core PRIVATE /W4)

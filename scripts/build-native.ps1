@@ -64,8 +64,8 @@ function Import-VSDeveloperEnvironment {
 function Assert-StaticThirdPartyLinkage([string]$extensionPath) {
     $dependencies = & dumpbin.exe /DEPENDENTS $extensionPath
     $forbiddenDependencies = @(
-        'datachannel.dll', 'juice.dll', 'usrsctp.dll', 'mbedtls.dll',
-        'mbedcrypto.dll', 'mbedx509.dll'
+        'datachannel.dll', 'juice.dll', 'usrsctp.dll', 'gnutls.dll',
+        'nettle.dll', 'hogweed.dll', 'gmp.dll', 'tasn1.dll'
     )
     $unexpectedDependencies = $forbiddenDependencies | Where-Object {
         $dependencies -match [regex]::Escape($_)
@@ -150,12 +150,10 @@ function Apply-DependencyPatch([string]$repository, [string]$patchPath) {
 
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $outDirectory = Join-Path $root "out\native"
-$prefixDirectory = Join-Path $outDirectory "prefix"
-$mbedBuildDirectory = Join-Path $outDirectory "mbedtls"
+$vcpkgDirectory = Join-Path $root "third_party\vcpkg"
 $wheelDirectory = Join-Path $outDirectory "wheel"
 $wheelExtractDirectory = Join-Path $outDirectory "wheel-extract"
 $libDataChannelCMake = Join-Path $root "third_party\libdatachannel\CMakeLists.txt"
-$mbedTlsCMake = Join-Path $root "third_party\mbedtls\CMakeLists.txt"
 $libDataChannelPatch = Join-Path $root "patches\libdatachannel_partial_send.patch"
 
 Import-VSDeveloperEnvironment
@@ -164,7 +162,7 @@ if ($Clean -and (Test-Path $outDirectory)) {
     Remove-Item -LiteralPath $outDirectory -Recurse -Force
 }
 
-if (-not (Test-Path $libDataChannelCMake) -or -not (Test-Path $mbedTlsCMake)) {
+if (-not (Test-Path $libDataChannelCMake)) {
     Write-Host "=== 1/5 Bootstrap pinned native dependencies ==="
     & python scripts\bootstrap.py
     if ($LASTEXITCODE -ne 0) {
@@ -183,45 +181,39 @@ if ($LASTEXITCODE -ne 0) {
     }
 }
 
-Write-Host "=== 3/5 Build static Mbed TLS ==="
-$mbedConfig = Join-Path $root "third_party\mbedtls\include\mbedtls\mbedtls_config.h"
-$mbedConfigContent = Get-Content $mbedConfig -Raw
-$patchedMbedConfigContent = $mbedConfigContent -replace `
-    '(?m)^\s*//\s*#define\s+MBEDTLS_SSL_DTLS_SRTP\s*$', `
-    '#define MBEDTLS_SSL_DTLS_SRTP'
-if ($patchedMbedConfigContent -ne $mbedConfigContent) {
-    [System.IO.File]::WriteAllText($mbedConfig, $patchedMbedConfigContent, [System.Text.UTF8Encoding]::new($false))
+Write-Host "=== 3/5 Provision static GnuTLS via vcpkg ==="
+$vcpkgInstalled = Join-Path $vcpkgDirectory "installed\x64-windows-static-md"
+$gnutlsLibrary = Join-Path $vcpkgInstalled "lib\gnutls.lib"
+if (-not (Test-Path $gnutlsLibrary)) {
+    & python scripts\bootstrap.py --windows-vcpkg
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows vcpkg GnuTLS provisioning failed"
+    }
 }
-if ((Get-Content $mbedConfig -Raw) -notmatch '(?m)^\s*#define\s+MBEDTLS_SSL_DTLS_SRTP\s*$') {
-    throw "MBEDTLS_SSL_DTLS_SRTP is required for libdatachannel's Mbed TLS backend"
+if (-not (Test-Path $gnutlsLibrary)) {
+    throw "Static GnuTLS library was not found after provisioning: $gnutlsLibrary"
 }
 
-& cmake `
-    -S (Join-Path $root 'third_party\mbedtls') `
-    -B $mbedBuildDirectory `
-    -G Ninja `
-    -DCMAKE_BUILD_TYPE=Release `
-    "-DCMAKE_INSTALL_PREFIX=$prefixDirectory" `
-    -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL `
-    -DENABLE_PROGRAMS=OFF `
-    -DENABLE_TESTING=OFF `
-    -DUSE_STATIC_MBEDTLS_LIBRARY=ON `
-    -DUSE_SHARED_MBEDTLS_LIBRARY=OFF
-if ($LASTEXITCODE -ne 0) {
-    throw "Mbed TLS configure failed"
+$pkgconf = Get-ChildItem -Path (Join-Path $vcpkgDirectory "installed") -Filter "pkgconf.exe" -Recurse -ErrorAction SilentlyContinue |
+    Select-Object -First 1 -ExpandProperty FullName
+if (-not $pkgconf) {
+    throw "pkgconf.exe was not found under $vcpkgDirectory\installed"
 }
-& cmake --build $mbedBuildDirectory --target install --parallel
-if ($LASTEXITCODE -ne 0) {
-    throw "Mbed TLS build/install failed"
+$pkgconfigDirectories = @(
+    (Join-Path $vcpkgInstalled "lib\pkgconfig"),
+    (Join-Path $vcpkgInstalled "share\pkgconfig")
+) | Where-Object { Test-Path $_ }
+if (-not $pkgconfigDirectories) {
+    throw "GnuTLS pkg-config metadata was not found under $vcpkgInstalled"
 }
+$env:PKG_CONFIG_PATH = $pkgconfigDirectories -join ';'
 
 New-Item -ItemType Directory -Force -Path $wheelDirectory | Out-Null
 $env:CMAKE_GENERATOR = 'Ninja'
-$mbedTlsConfigDirectory = Join-Path $prefixDirectory 'lib\cmake\MbedTLS'
 
 Write-Host "=== 4/5 Build native wheel ==="
 & python -m build --wheel --no-isolation --outdir $wheelDirectory `
-    "--config-setting=cmake.args=-DMbedTLS_DIR=$mbedTlsConfigDirectory"
+    "--config-setting=cmake.args=-DPKG_CONFIG_EXECUTABLE=$pkgconf"
 if ($LASTEXITCODE -ne 0) {
     throw "Native wheel build failed"
 }

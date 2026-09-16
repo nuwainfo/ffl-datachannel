@@ -22,12 +22,10 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${PYTHON:-python3}"
 ARCH="${ARCH:-$(uname -m)}"
 OUT="$ROOT/out/native-macos"
-PREFIX="$OUT/prefix"
-MBED_BUILD="$OUT/mbedtls"
 WHEEL_DIR="$OUT/wheel"
 WHEEL_EXTRACT="$OUT/wheel-extract"
 
-for command in cmake git otool "$PYTHON"; do
+for command in cmake git otool pkg-config "$PYTHON"; do
     command -v "$command" >/dev/null 2>&1 || {
         echo "Missing required command: $command" >&2
         exit 1
@@ -55,7 +53,7 @@ apply_dependency_patch() {
 echo "python        : $($PYTHON -V 2>&1)"
 echo "architecture  : $ARCH"
 
-if [[ ! -f "$ROOT/third_party/libdatachannel/CMakeLists.txt" || ! -f "$ROOT/third_party/mbedtls/CMakeLists.txt" ]]; then
+if [[ ! -f "$ROOT/third_party/libdatachannel/CMakeLists.txt" ]]; then
     "$PYTHON" "$ROOT/scripts/bootstrap.py"
 fi
 apply_dependency_patch
@@ -64,47 +62,52 @@ if ! "$PYTHON" -c 'import build, scikit_build_core' >/dev/null 2>&1; then
     "$PYTHON" -m pip install --disable-pip-version-check build scikit-build-core
 fi
 
-rm -rf "$MBED_BUILD" "$PREFIX" "$WHEEL_DIR" "$WHEEL_EXTRACT"
+rm -rf "$WHEEL_DIR" "$WHEEL_EXTRACT"
 mkdir -p "$WHEEL_DIR"
 
-MBED_CONFIG="$ROOT/third_party/mbedtls/include/mbedtls/mbedtls_config.h"
-if ! grep -Eq '^[[:space:]]*#define[[:space:]]+MBEDTLS_SSL_DTLS_SRTP[[:space:]]*$' "$MBED_CONFIG"; then
-    sed -i.bak -E 's|^([[:space:]]*)//[[:space:]]*#define[[:space:]]+MBEDTLS_SSL_DTLS_SRTP[[:space:]]*$|#define MBEDTLS_SSL_DTLS_SRTP|' "$MBED_CONFIG"
-    rm -f "$MBED_CONFIG.bak"
+export ARCHFLAGS="-arch $ARCH"
+
+GNUTLS_ROOT="${FFL_DATACHANNEL_GNUTLS_ROOT:-}"
+if [[ -z "$GNUTLS_ROOT" ]] && command -v brew >/dev/null 2>&1; then
+    GNUTLS_ROOT="$(brew --prefix gnutls 2>/dev/null || true)"
 fi
-grep -Eq '^[[:space:]]*#define[[:space:]]+MBEDTLS_SSL_DTLS_SRTP[[:space:]]*$' "$MBED_CONFIG" || {
-    echo "MBEDTLS_SSL_DTLS_SRTP is required for the Mbed TLS backend" >&2
+
+for pkgConfigDirectory in "$GNUTLS_ROOT/lib/pkgconfig" "$GNUTLS_ROOT/share/pkgconfig"; do
+    if [[ -f "$pkgConfigDirectory/gnutls.pc" ]]; then
+        export PKG_CONFIG_PATH="$pkgConfigDirectory${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+        echo "Using GnuTLS pkg-config metadata: $pkgConfigDirectory/gnutls.pc"
+        break
+    fi
+done
+
+if ! pkg-config --atleast-version=3.8 gnutls; then
+    cat >&2 <<'EOF'
+ffl-datachannel requires GnuTLS 3.8.x or newer.
+
+Install the macOS prerequisites and rerun the build:
+
+  brew install cmake git pkg-config gnutls python
+
+Set FFL_DATACHANNEL_GNUTLS_ROOT=/path/to/prefix when GnuTLS is installed
+outside Homebrew's default prefix.
+EOF
     exit 1
-}
+fi
 
 cmake_args=(
     -DCMAKE_BUILD_TYPE=Release
-    -DCMAKE_POSITION_INDEPENDENT_CODE=ON
     -DCMAKE_OSX_ARCHITECTURES="$ARCH"
-    -DCMAKE_INSTALL_PREFIX="$PREFIX"
-    -DENABLE_PROGRAMS=OFF
-    -DENABLE_TESTING=OFF
-    -DUSE_STATIC_MBEDTLS_LIBRARY=ON
-    -DUSE_SHARED_MBEDTLS_LIBRARY=OFF
 )
 if [[ -n "${MACOSX_DEPLOYMENT_TARGET:-}" ]]; then
     cmake_args+=("-DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET")
 fi
 
-cmake -S "$ROOT/third_party/mbedtls" -B "$MBED_BUILD" "${cmake_args[@]}"
-cmake --build "$MBED_BUILD" --target install --parallel
-
-export ARCHFLAGS="-arch $ARCH"
-MBEDTLS_CONFIG="$(find "$PREFIX" -type f -path '*/cmake/MbedTLS/MbedTLSConfig.cmake' -print -quit)"
-[[ -n "$MBEDTLS_CONFIG" ]] || {
-    echo "Mbed TLS installed without its CMake package configuration below: $PREFIX" >&2
-    exit 1
-}
-MBEDTLS_DIR="$(dirname "$MBEDTLS_CONFIG")"
-
-# CMAKE_ARGS is consumed directly by scikit-build-core's CMake invocation.
-# This avoids relying on the build frontend to forward a PEP 517 setting.
-export CMAKE_ARGS="${CMAKE_ARGS:+$CMAKE_ARGS }-DMbedTLS_DIR=$MBEDTLS_DIR -DCMAKE_OSX_ARCHITECTURES=$ARCH"
+# The build links GnuTLS dynamically here: Homebrew only ships a shared
+# libgnutls, and it owns its own transitive crypto dependencies (Nettle,
+# GMP, libtasn1). CMAKE_ARGS is consumed directly by scikit-build-core's
+# CMake invocation, which resolves GnuTLS itself via pkg-config using the
+# PKG_CONFIG_PATH exported above.
+export CMAKE_ARGS="${CMAKE_ARGS:+$CMAKE_ARGS }${cmake_args[*]}"
 "$PYTHON" -m build --wheel --no-isolation --outdir "$WHEEL_DIR" "$ROOT"
 
 wheels=("$WHEEL_DIR"/*.whl)
@@ -129,9 +132,11 @@ PY
 extension="$(find "$WHEEL_EXTRACT/ffl_datachannel" -maxdepth 1 -name '_ffl_datachannel*.so' -print -quit)"
 dependencies="$(otool -L "$extension")"
 printf '%s\n' "$dependencies"
-if grep -Eiq '(libdatachannel|libjuice|libusrsctp|libmbedtls|libmbedcrypto|libmbedx509)\.(dylib|so)' <<<"$dependencies"; then
-    echo "The extension has dynamically linked third-party dependencies." >&2
+if grep -Eiq '(libdatachannel|libjuice|libusrsctp)\.(dylib|so)' <<<"$dependencies"; then
+    echo "The extension has dynamically linked vendored third-party dependencies." >&2
     exit 1
 fi
+# A dynamic Homebrew libgnutls dependency is expected here, unlike the
+# vendored libraries checked above, which must always stay statically linked.
 
 echo "[PASS] Native macOS wheel build completed: ${wheels[0]}"

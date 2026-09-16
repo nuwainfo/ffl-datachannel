@@ -4,8 +4,8 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "ffl-datachannel"
-version = "0.2.3"
-description = "aiortc-compatible WebRTC DataChannel subset backed by statically linked libdatachannel and Mbed TLS"
+version = "0.3.0"
+description = "aiortc-compatible WebRTC DataChannel subset backed by libdatachannel and GnuTLS"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{name = "FastFileLink"}]
@@ -48,5 +48,6 @@ include = [
     "scripts/**",
     "docs/**",
     "patches/**",
+    "vcpkg-overlays/**",
     "tests/**",
 ]

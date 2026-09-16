@@ -2,8 +2,10 @@
 
 `ffl-datachannel` is a focused Python WebRTC DataChannel transport. It exposes
 the aiortc-compatible subset used by FastFileLink, backed by libdatachannel,
-libjuice, usrsctp, and Mbed TLS. Native wheels statically link that transport
-and crypto stack; OpenSSL is not used.
+libjuice, usrsctp, and GnuTLS. Native wheels always statically link
+libdatachannel, libjuice, and usrsctp; OpenSSL is not used. GnuTLS itself is
+statically linked (via vcpkg) only on Windows — Linux and macOS wheels link
+it dynamically against the host's system GnuTLS 3.8.x installation.
 
 ## Compatibility scope
 
@@ -38,11 +40,12 @@ FastFileLink-style candidate dictionaries, or `None` for end-of-candidates.
 
 ## Build native wheels
 
-Pinned dependencies are libdatachannel v0.24.5, Mbed TLS 3.6.7, and the
-libdatachannel-pinned libjuice, usrsctp, and plog submodules. All build scripts
-fetch missing sources, build static Mbed TLS with `MBEDTLS_SSL_DTLS_SRTP`, and
-verify that the final extension does not dynamically link to the third-party
-transport or Mbed TLS libraries.
+Pinned dependencies are libdatachannel v0.24.5 and the libdatachannel-pinned
+libjuice, usrsctp, and plog submodules. GnuTLS 3.8.x is not vendored: Windows
+provisions a static build via vcpkg (see below), while Linux and macOS expect
+a system GnuTLS development package. All build scripts fetch missing sources
+and verify that the final extension does not dynamically link to the vendored
+transport libraries (libdatachannel, libjuice, usrsctp).
 
 ### Windows
 
@@ -56,13 +59,30 @@ python -m pip install --force-reinstall --no-deps .\out\native\wheel\ffl_datacha
 
 The script initializes a Visual Studio x64 environment, writes generated files
 to `out\native`, and verifies dependencies with `dumpbin /DEPENDENTS`. Use
-`-Clean` to recreate that output directory. Do not invoke `python -m build
---wheel` directly unless you have already installed Mbed TLS and explicitly
-provide its `MbedTLS_DIR` package-config directory.
+`-Clean` to recreate that output directory. GnuTLS has no native MSVC build of
+its own, so the script provisions it from a pinned vcpkg checkout
+(`third_party/vcpkg`) using the repository-owned
+`vcpkg-overlays/shiftmedia-libgnutls` overlay port, which restores a Windows
+GnuTLS port that upstream vcpkg has since delisted. That installs a static
+`gnutls.lib` (triplet `x64-windows-static-md`) plus `pkgconf`, which the CMake
+configure step uses to resolve GnuTLS's full static closure (Nettle, GMP,
+libtasn1, zlib). Do not invoke `python -m build --wheel` directly unless you
+have already provisioned that toolchain and pass its `pkgconf.exe` via
+`-DPKG_CONFIG_EXECUTABLE`.
 
 ### Linux and macOS
 
-Run the platform script from the repository root:
+Install a GnuTLS 3.8.x (or newer) development package first:
+
+```bash
+# Debian/Ubuntu
+sudo apt install libgnutls28-dev pkg-config
+
+# macOS
+brew install cmake git pkg-config gnutls python
+```
+
+Then run the platform script from the repository root:
 
 ```bash
 bash ./scripts/build-linux.sh
@@ -70,16 +90,20 @@ bash ./scripts/build-linux.sh
 bash ./scripts/build-macos.sh
 ```
 
-Wheels are written to `out/native-linux/wheel/` or
-`out/native-macos/wheel/`. The macOS script accepts `ARCH` (default:
-`uname -m`) and respects `MACOSX_DEPLOYMENT_TARGET`. Both scripts locate the
-installed `MbedTLSConfig.cmake` automatically, supporting either `lib/` or
-`lib64/` layouts.
+Wheels are written to `out/native-linux/wheel/` or `out/native-macos/wheel/`.
+The macOS script accepts `ARCH` (default: `uname -m`) and respects
+`MACOSX_DEPLOYMENT_TARGET`. Both scripts locate GnuTLS via `pkg-config`; set
+`FFL_DATACHANNEL_GNUTLS_ROOT` to point at an alternate prefix (for example a
+Conda environment on Linux, or a non-default Homebrew prefix on macOS) when
+the default `pkg-config` search does not find it. Unlike the vendored
+transport libraries, GnuTLS is linked dynamically on these platforms, so the
+resulting wheel depends on the host's `libgnutls` at runtime.
 
 On Linux, `auditwheel` is optional. If `MANYLINUX_PLAT`, `AUDITWHEEL_PLAT`, or
 the local auditwheel/glibc policy identifies a supported manylinux target, the
-script repairs the raw wheel for that policy. Otherwise it produces a native
-Linux wheel unchanged.
+script repairs the raw wheel for that policy (bundling the dynamic GnuTLS
+dependency). Otherwise it produces a native Linux wheel that depends on the
+build host's system GnuTLS.
 
 ## Test and validate
 
@@ -110,7 +134,9 @@ The browser suite drives Chrome and Firefox over localhost and checks a
 
 To inspect a wheel manually, use `ldd` on Linux, `otool -L` on macOS, or
 `dumpbin /DEPENDENTS` on Windows. None should report dynamic libdatachannel,
-libjuice, usrsctp, mbedtls, mbedcrypto, or mbedx509 libraries.
+libjuice, or usrsctp libraries. On Windows, GnuTLS and its closure (Nettle,
+GMP, libtasn1, zlib) must also be static; on Linux and macOS a dynamic
+GnuTLS dependency is expected.
 
 ## FastFileLink integration checks
 

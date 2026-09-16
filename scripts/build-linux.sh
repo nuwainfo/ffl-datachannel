@@ -21,13 +21,11 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${PYTHON:-python3}"
 OUT="$ROOT/out/native-linux"
-PREFIX="$OUT/prefix"
-MBED_BUILD="$OUT/mbedtls"
 RAW_WHEEL="$OUT/raw-wheel"
 WHEEL_DIR="$OUT/wheel"
 WHEEL_EXTRACT="$OUT/wheel-extract"
 
-for command in cmake git ldd "$PYTHON"; do
+for command in cmake git ldd pkg-config "$PYTHON"; do
     command -v "$command" >/dev/null 2>&1 || {
         echo "Missing required command: $command" >&2
         exit 1
@@ -83,7 +81,7 @@ else
 fi
 echo "python        : $($PYTHON -V 2>&1)"
 
-if [[ ! -f "$ROOT/third_party/libdatachannel/CMakeLists.txt" || ! -f "$ROOT/third_party/mbedtls/CMakeLists.txt" ]]; then
+if [[ ! -f "$ROOT/third_party/libdatachannel/CMakeLists.txt" ]]; then
     "$PYTHON" "$ROOT/scripts/bootstrap.py"
 fi
 apply_dependency_patch
@@ -92,39 +90,35 @@ if ! "$PYTHON" -c 'import build, scikit_build_core' >/dev/null 2>&1; then
     "$PYTHON" -m pip install --disable-pip-version-check build scikit-build-core
 fi
 
-rm -rf "$MBED_BUILD" "$PREFIX" "$RAW_WHEEL" "$WHEEL_DIR" "$WHEEL_EXTRACT"
+rm -rf "$RAW_WHEEL" "$WHEEL_DIR" "$WHEEL_EXTRACT"
 mkdir -p "$RAW_WHEEL" "$WHEEL_DIR"
 
-MBED_CONFIG="$ROOT/third_party/mbedtls/include/mbedtls/mbedtls_config.h"
-if ! grep -Eq '^[[:space:]]*#define[[:space:]]+MBEDTLS_SSL_DTLS_SRTP[[:space:]]*$' "$MBED_CONFIG"; then
-    sed -i.bak -E 's|^([[:space:]]*)//[[:space:]]*#define[[:space:]]+MBEDTLS_SSL_DTLS_SRTP[[:space:]]*$|#define MBEDTLS_SSL_DTLS_SRTP|' "$MBED_CONFIG"
-    rm -f "$MBED_CONFIG.bak"
+GNUTLS_ROOT="${FFL_DATACHANNEL_GNUTLS_ROOT:-${CONDA_PREFIX:-}}"
+if [[ -n "$GNUTLS_ROOT" && -f "$GNUTLS_ROOT/lib/pkgconfig/gnutls.pc" ]]; then
+    export PKG_CONFIG_PATH="$GNUTLS_ROOT/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    echo "Using GnuTLS pkg-config metadata: $GNUTLS_ROOT/lib/pkgconfig/gnutls.pc"
 fi
-grep -Eq '^[[:space:]]*#define[[:space:]]+MBEDTLS_SSL_DTLS_SRTP[[:space:]]*$' "$MBED_CONFIG" || {
-    echo "MBEDTLS_SSL_DTLS_SRTP is required for the Mbed TLS backend" >&2
+
+if ! pkg-config --atleast-version=3.8 gnutls; then
+    cat >&2 <<'EOF'
+ffl-datachannel requires GnuTLS 3.8.x or newer.
+Install a system GnuTLS development package (e.g. `apt install libgnutls28-dev`
+on Debian/Ubuntu), or install GnuTLS in the active Conda environment and rerun
+this command:
+
+  conda install -c conda-forge "gnutls>=3.8" pkg-config
+
+Set FFL_DATACHANNEL_GNUTLS_ROOT=/path/to/prefix when the desired gnutls.pc is
+outside the active Conda environment.
+EOF
     exit 1
-}
+fi
 
-cmake -S "$ROOT/third_party/mbedtls" -B "$MBED_BUILD" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-    -DCMAKE_INSTALL_PREFIX="$PREFIX" \
-    -DENABLE_PROGRAMS=OFF \
-    -DENABLE_TESTING=OFF \
-    -DUSE_STATIC_MBEDTLS_LIBRARY=ON \
-    -DUSE_SHARED_MBEDTLS_LIBRARY=OFF
-cmake --build "$MBED_BUILD" --target install --parallel
-
-MBEDTLS_CONFIG="$(find "$PREFIX" -type f -path '*/cmake/MbedTLS/MbedTLSConfig.cmake' -print -quit)"
-[[ -n "$MBEDTLS_CONFIG" ]] || {
-    echo "Mbed TLS installed without its CMake package configuration below: $PREFIX" >&2
-    exit 1
-}
-MBEDTLS_DIR="$(dirname "$MBEDTLS_CONFIG")"
-
-# CMAKE_ARGS is consumed directly by scikit-build-core's CMake invocation.
-# This avoids relying on the build frontend to forward a PEP 517 setting.
-export CMAKE_ARGS="${CMAKE_ARGS:+$CMAKE_ARGS }-DMbedTLS_DIR=$MBEDTLS_DIR"
+# The build links GnuTLS dynamically here: system distributions only ship a
+# shared libgnutls, and it owns its own transitive crypto dependencies
+# (Nettle, GMP, libtasn1). CMAKE_ARGS is consumed directly by
+# scikit-build-core's CMake invocation, which resolves GnuTLS itself via
+# pkg-config using the PKG_CONFIG_PATH exported above.
 "$PYTHON" -m build --wheel --no-isolation --outdir "$RAW_WHEEL" "$ROOT"
 
 raw_wheels=("$RAW_WHEEL"/*.whl)
@@ -160,9 +154,12 @@ PY
 extension="$(find "$WHEEL_EXTRACT/ffl_datachannel" -maxdepth 1 -name '_ffl_datachannel*.so' -print -quit)"
 dependencies="$(ldd "$extension")"
 printf '%s\n' "$dependencies"
-if grep -Eiq '(libdatachannel|libjuice|libusrsctp|libmbedtls|libmbedcrypto|libmbedx509)\.so' <<<"$dependencies"; then
-    echo "The extension has dynamically linked third-party dependencies." >&2
+if grep -Eiq '(libdatachannel|libjuice|libusrsctp)\.so' <<<"$dependencies"; then
+    echo "The extension has dynamically linked vendored third-party dependencies." >&2
     exit 1
 fi
+# A dynamic GnuTLS dependency is expected here (renamed with a hash suffix by
+# auditwheel repair when manylinux bundling applies), unlike the vendored
+# libraries checked above, which must always stay statically linked.
 
 echo "[PASS] Native Linux wheel build completed: ${wheels[0]}"

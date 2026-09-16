@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "ffl-datachannel"
-version = "0.3.0"
+version = "0.3.1"
 description = "aiortc-compatible WebRTC DataChannel subset backed by libdatachannel and GnuTLS"
 readme = "README.md"
 requires-python = ">=3.10"

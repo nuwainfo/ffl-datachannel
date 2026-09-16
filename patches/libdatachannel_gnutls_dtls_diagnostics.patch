@@ -1,5 +1,5 @@
 diff --git a/src/impl/dtlstransport.cpp b/src/impl/dtlstransport.cpp
-index 689eb06..1af028d 100644
+index 689eb06..441cfbc 100644
 --- a/src/impl/dtlstransport.cpp
 +++ b/src/impl/dtlstransport.cpp
 @@ -220,7 +220,14 @@ void DtlsTransport::doRecv() {
@@ -35,6 +35,37 @@ index 689eb06..1af028d 100644
  				// RFC 8827: Implementations MUST NOT implement DTLS renegotiation and MUST reject
  				// it with a "no_renegotiation" alert if offered. See
  				// https://www.rfc-editor.org/rfc/rfc8827.html#section-6.5
+@@ -316,13 +333,19 @@ ssize_t DtlsTransport::WriteCallback(gnutls_transport_ptr_t ptr, const void *dat
+ 	try {
+ 		if (len > 0) {
+ 			auto b = reinterpret_cast<const byte *>(data);
+-			t->outgoing(make_message(b, b + len));
++			if (!t->outgoing(make_message(b, b + len))) {
++				// Transient backpressure (e.g. ICE send buffer full): let GnuTLS's
++				// existing GNUTLS_E_AGAIN retry path handle it instead of reporting
++				// the packet as sent.
++				gnutls_transport_set_errno(t->mSession, EAGAIN);
++				return -1;
++			}
+ 		}
+ 		gnutls_transport_set_errno(t->mSession, 0);
+ 		return ssize_t(len);
+ 
+ 	} catch (const std::exception &e) {
+-		PLOG_WARNING << e.what();
++		PLOG_ERROR << "DTLS push callback exception, len=" << len << ": " << e.what();
+ 		gnutls_transport_set_errno(t->mSession, ECONNRESET);
+ 		return -1;
+ 	}
+@@ -353,7 +376,7 @@ ssize_t DtlsTransport::ReadCallback(gnutls_transport_ptr_t ptr, void *data, size
+ 		return 0;
+ 
+ 	} catch (const std::exception &e) {
+-		PLOG_WARNING << e.what();
++		PLOG_ERROR << e.what();
+ 		gnutls_transport_set_errno(t->mSession, ECONNRESET);
+ 		return -1;
+ 	}
 diff --git a/src/impl/tls.cpp b/src/impl/tls.cpp
 index 60dbb2c..7f4f0bc 100644
 --- a/src/impl/tls.cpp

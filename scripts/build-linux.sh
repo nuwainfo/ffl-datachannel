@@ -56,8 +56,8 @@ detect_manylinux_plat() {
 }
 
 apply_dependency_patch() {
+    local patch="$1"
     local repo="$ROOT/third_party/libdatachannel"
-    local patch="$ROOT/patches/libdatachannel_partial_send.patch"
 
     # Vendored source may have whitespace normalized by the checkout host.
     # Ignore only whitespace differences; still require every patch hunk to
@@ -84,7 +84,8 @@ echo "python        : $($PYTHON -V 2>&1)"
 if [[ ! -f "$ROOT/third_party/libdatachannel/CMakeLists.txt" ]]; then
     "$PYTHON" "$ROOT/scripts/bootstrap.py"
 fi
-apply_dependency_patch
+apply_dependency_patch "$ROOT/patches/libdatachannel_partial_send.patch"
+apply_dependency_patch "$ROOT/patches/libdatachannel_gnutls_dtls_diagnostics.patch"
 
 if ! "$PYTHON" -c 'import build, scikit_build_core' >/dev/null 2>&1; then
     "$PYTHON" -m pip install --disable-pip-version-check build scikit-build-core

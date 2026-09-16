@@ -38,6 +38,26 @@ channel.on("bufferedamountlow", on_buffer_low)
 form without the `candidate:` prefix. `addIceCandidate()` accepts candidates,
 FastFileLink-style candidate dictionaries, or `None` for end-of-candidates.
 
+## Native logging
+
+`set_log_level(level)` configures libdatachannel's native logger (silent by
+default), writing directly to stderr as `[ffl_datachannel] LEVEL message`:
+
+```python
+import logging
+import ffl_datachannel
+ffl_datachannel.set_log_level(logging.DEBUG)
+```
+
+`level` is a standard `logging` module level (`logging.DEBUG`, `.INFO`,
+`.WARNING`, `.ERROR`, `.CRITICAL`, ...); anything at or below a threshold
+maps to the nearest native level (`CRITICAL` maps to native `fatal`; above
+`CRITICAL` maps to `none`). This mirrors `ffl_p2p.Native.setNativeLoggingLevel`.
+Can also be set at process startup via `FFL_DATACHANNEL_LOG_LEVEL` (a native
+level name — `verbose`/`debug`/`info`/`warning`/`error`/`fatal`/`none` — read
+once, at first `RTCPeerConnection` construction). Both are process-wide and
+safe to call repeatedly to change the level at runtime.
+
 ## Build native wheels
 
 Pinned dependencies are libdatachannel v0.24.5 and the libdatachannel-pinned

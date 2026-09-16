@@ -18,13 +18,35 @@
 # limitations under the License.
 
 import asyncio
+import logging
 
 import pytest
 
-from ffl_datachannel import RTCPeerConnection
+from ffl_datachannel import RTCPeerConnection, set_log_level
 
 
 pytestmark = pytest.mark.native
+
+
+@pytest.mark.parametrize(
+    "level",
+    [
+        logging.NOTSET,
+        logging.DEBUG,
+        logging.INFO,
+        logging.WARNING,
+        logging.ERROR,
+        logging.CRITICAL,
+        logging.CRITICAL + 1,
+    ],
+)
+def test_set_log_level_accepts_logging_module_levels(level):
+    set_log_level(level)
+
+
+def test_set_log_level_rejects_non_integer_level():
+    with pytest.raises(TypeError):
+        set_log_level("debug")
 
 
 @pytest.mark.asyncio

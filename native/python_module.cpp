@@ -619,6 +619,25 @@ PyObject *getBufferedAmount(PyObject *, PyObject *args) {
     }
 }
 
+PyObject *setLogLevel(PyObject *, PyObject *args) {
+    const char *name = nullptr;
+    if (!PyArg_ParseTuple(args, "s:set_log_level", &name)) {
+        return nullptr;
+    }
+
+    rtcLogLevel level;
+    if (!parseLogLevelName(name, level)) {
+        PyErr_SetString(
+            PyExc_ValueError,
+            "log level must be one of: verbose, debug, info, warning, error, fatal, none"
+        );
+        return nullptr;
+    }
+
+    setNativeLogLevel(level);
+    Py_RETURN_NONE;
+}
+
 PyObject *setBufferedAmountLowThreshold(PyObject *, PyObject *args) {
     PyObject *capsule = nullptr;
     int channelId = -1;
@@ -656,6 +675,7 @@ PyMethodDef moduleMethods[] = {
     {"get_data_channel_stream", getDataChannelStream, METH_VARARGS, nullptr},
     {"get_buffered_amount", getBufferedAmount, METH_VARARGS, nullptr},
     {"set_buffered_amount_low_threshold", setBufferedAmountLowThreshold, METH_VARARGS, nullptr},
+    {"set_log_level", setLogLevel, METH_VARARGS, nullptr},
     {nullptr, nullptr, 0, nullptr},
 };
 

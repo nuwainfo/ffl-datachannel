@@ -19,6 +19,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from enum import IntEnum
 from typing import Any, Callable
 
@@ -111,6 +113,38 @@ class NativePeerConnection:
             return
         native.close_peer_connection(self._handle)
         self._closed = True
+
+
+# Ordered ascending by severity threshold. A level at or below the given
+# logging module value maps to the first (least severe) matching native
+# name; anything above every threshold here (i.e. above logging.CRITICAL)
+# maps to "none". This mirrors ffl_p2p.Native.setNativeLoggingLevel.
+_NATIVE_LOG_LEVEL_NAMES = (
+    (logging.DEBUG, "debug"),
+    (logging.INFO, "info"),
+    (logging.WARNING, "warning"),
+    (logging.ERROR, "error"),
+    (logging.CRITICAL, "fatal"),
+)
+
+
+def set_log_level(level: int) -> None:
+    """Configure libdatachannel's native logger.
+
+    ``level`` is a standard :mod:`logging` level (for example
+    ``logging.DEBUG``). Logs are written directly to stderr. Safe to call at
+    any time, including before any RTCPeerConnection is created, and safe to
+    call repeatedly to change the level at runtime.
+    """
+    if not isinstance(level, int):
+        raise TypeError("log level must be an integer from the logging module")
+
+    for loggingLevel, nativeLevelName in _NATIVE_LOG_LEVEL_NAMES:
+        if level <= loggingLevel:
+            native.set_log_level(nativeLevelName)
+            return
+
+    native.set_log_level("none")
 
 
 NativeError = native.NativeError

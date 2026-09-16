@@ -1,0 +1,52 @@
+diff --git a/src/impl/dtlstransport.cpp b/src/impl/dtlstransport.cpp
+index 689eb06..1af028d 100644
+--- a/src/impl/dtlstransport.cpp
++++ b/src/impl/dtlstransport.cpp
+@@ -220,7 +220,14 @@ void DtlsTransport::doRecv() {
+ 			// See https://www.rfc-editor.org/rfc/rfc8261.html#section-5
+ 			gnutls_dtls_set_mtu(mSession, bufferSize + 1);
+ 
+-			PLOG_INFO << "DTLS handshake finished";
++			// Negotiated protocol version and cipher suite, for diagnosing
++			// version/cipher-dependent connectivity issues.
++			if (char *sessionDescription = gnutls_session_get_desc(mSession)) {
++				PLOG_INFO << "DTLS handshake finished, session=" << sessionDescription;
++				gnutls_free(sessionDescription);
++			} else {
++				PLOG_INFO << "DTLS handshake finished";
++			}
+ 			changeState(State::Connected);
+ 			postHandshake();
+ 		}
+@@ -233,6 +240,16 @@ void DtlsTransport::doRecv() {
+ 					return;
+ 				}
+ 
++				// Any other non-EAGAIN return is exceptional (retransmit, rehandshake
++				// rejection, remote close, or a fatal error handled below). Log its code
++				// and symbolic name for diagnosing connectivity issues; this branch is not
++				// on the per-packet success path, so it does not affect steady-state timing.
++				if (ret < 0) {
++					PLOG_DEBUG << "DTLS record recv: code=" << ret << " ("
++					           << gnutls_strerror_name(static_cast<int>(ret)) << ") "
++					           << gnutls_strerror(static_cast<int>(ret));
++				}
++
+ 				// RFC 8827: Implementations MUST NOT implement DTLS renegotiation and MUST reject
+ 				// it with a "no_renegotiation" alert if offered. See
+ 				// https://www.rfc-editor.org/rfc/rfc8827.html#section-6.5
+diff --git a/src/impl/tls.cpp b/src/impl/tls.cpp
+index 60dbb2c..7f4f0bc 100644
+--- a/src/impl/tls.cpp
++++ b/src/impl/tls.cpp
+@@ -21,7 +21,9 @@ bool check(int ret, const string &message) {
+ 		if (!gnutls_error_is_fatal(ret)) {
+ 			return false;
+ 		}
+-		throw std::runtime_error(message + ": " + gnutls_strerror(ret));
++		throw std::runtime_error(message + ": " + gnutls_strerror(ret) + " (" +
++		                          gnutls_strerror_name(ret) + ", code=" + std::to_string(ret) +
++		                          ")");
+ 	}
+ 	return true;
+ }

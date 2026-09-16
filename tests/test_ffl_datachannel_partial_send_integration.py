@@ -34,6 +34,8 @@ applies rtcSetSctpSettings only before libdatachannel's runtime is preloaded.
 import asyncio
 import os
 
+import pytest
+
 # These are honored by the ffl native wrapper version used for the throughput
 # experiments. A small send buffer makes positive short writes / backpressure
 # much easier to exercise. The 8 MiB burst below still exceeds libdatachannel's
@@ -42,6 +44,8 @@ os.environ.setdefault("FFL_DATACHANNEL_SCTP_SEND_BUFFER_SIZE", str(256 * 1024))
 os.environ.setdefault("FFL_DATACHANNEL_SCTP_RECV_BUFFER_SIZE", str(4 * 1024 * 1024))
 
 from ffl_datachannel import RTCPeerConnection, RTCSessionDescription  # noqa: E402
+
+pytestmark = pytest.mark.native
 
 
 def _collect_candidates(pc):

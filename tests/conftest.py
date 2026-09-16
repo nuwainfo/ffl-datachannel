@@ -90,6 +90,7 @@ def _install_fake_native() -> None:
         "get_data_channel_stream",
         "get_buffered_amount",
         "set_buffered_amount_low_threshold",
+        "set_log_level",
     ):
         setattr(native, name, unavailable)
 

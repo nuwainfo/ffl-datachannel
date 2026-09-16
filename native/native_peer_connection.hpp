@@ -31,6 +31,18 @@ limitations under the License.
 
 namespace ffl::datachannel {
 
+// Parses a case-sensitive level name (verbose, debug, info, warning/warn,
+// error, fatal, none) into a libdatachannel rtcLogLevel. Returns false for
+// an unrecognized name, leaving level unchanged.
+bool parseLogLevelName(const char *name, rtcLogLevel &level);
+
+// Configures libdatachannel's logger to write to stderr at the given
+// severity. Safe to call at any time, including before any
+// NativePeerConnection is constructed, and safe to call repeatedly to
+// change the level at runtime: the underlying rtcInitLogger() only updates
+// the active severity threshold on later calls.
+void setNativeLogLevel(rtcLogLevel level);
+
 struct DataChannelOptions {
     bool ordered = true;
     bool negotiated = false;

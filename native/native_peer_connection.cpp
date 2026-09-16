@@ -22,6 +22,7 @@ limitations under the License.
 
 #include <cerrno>
 #include <climits>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -32,13 +33,52 @@ namespace ffl::datachannel {
 namespace {
 
 std::once_flag runtimeOnce;
+
+const char *logLevelName(rtcLogLevel level) {
+    switch (level) {
+    case RTC_LOG_NONE: return "NONE";
+    case RTC_LOG_FATAL: return "FATAL";
+    case RTC_LOG_ERROR: return "ERROR";
+    case RTC_LOG_WARNING: return "WARNING";
+    case RTC_LOG_INFO: return "INFO";
+    case RTC_LOG_DEBUG: return "DEBUG";
+    case RTC_LOG_VERBOSE: return "VERBOSE";
+    default: return "LOG";
+    }
+}
+
+// libdatachannel invokes this off whichever thread produced the log record
+// (an ICE, DTLS, or SCTP worker thread), never the Python thread, so it must
+// not touch the GIL or any Python object.
+void RTC_API nativeLogCallback(rtcLogLevel level, const char *message) {
+    if (!message) {
+        return;
+    }
+    std::fprintf(stderr, "[ffl_datachannel] %s %s\n", logLevelName(level), message);
+    std::fflush(stderr);
+}
 // FastFileLink sends 256 KiB plaintext chunks.  E2EE adds a 31-byte
 // authenticated frame header, so a native channel must accept that complete
 // browser-compatible message while retaining SCTP's normal backpressure.
 constexpr int MAXIMUM_DATA_CHANNEL_MESSAGE_SIZE = 256 * 1024 + 31;
 
+// MSVC flags std::getenv as unsafe in multi-threaded programs; every call
+// site here reads a startup-only configuration variable inside the
+// call_once-guarded runtime init path, so a mutating environment is not a
+// concern.
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+const char *readEnvironmentVariable(const char *name) {
+    return std::getenv(name);
+}
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+
 bool readIntEnvironmentVariable(const char *name, int &output) {
-    const char *value = std::getenv(name);
+    const char *value = readEnvironmentVariable(name);
     if (!value || !*value) {
         return false;
     }
@@ -85,6 +125,34 @@ std::string normalizeRemoteMaxMessageSize(std::string sdp) {
 }
 
 } // namespace
+
+bool parseLogLevelName(const char *name, rtcLogLevel &level) {
+    if (!name) {
+        return false;
+    }
+    if (std::strcmp(name, "none") == 0) {
+        level = RTC_LOG_NONE;
+    } else if (std::strcmp(name, "fatal") == 0) {
+        level = RTC_LOG_FATAL;
+    } else if (std::strcmp(name, "error") == 0) {
+        level = RTC_LOG_ERROR;
+    } else if (std::strcmp(name, "warning") == 0 || std::strcmp(name, "warn") == 0) {
+        level = RTC_LOG_WARNING;
+    } else if (std::strcmp(name, "info") == 0) {
+        level = RTC_LOG_INFO;
+    } else if (std::strcmp(name, "debug") == 0) {
+        level = RTC_LOG_DEBUG;
+    } else if (std::strcmp(name, "verbose") == 0) {
+        level = RTC_LOG_VERBOSE;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+void setNativeLogLevel(rtcLogLevel level) {
+    rtcInitLogger(level, nativeLogCallback);
+}
 
 NativePeerConnection::NativePeerConnection(EventSink &sink, const std::vector<std::string> &iceServers)
     : sink_(sink) {
@@ -167,6 +235,21 @@ void NativePeerConnection::ensureRuntimeReady() {
             if (result < 0) {
                 throw std::runtime_error(resultMessage("rtcSetSctpSettings", result));
             }
+        }
+
+        // Opt-in native logging for diagnosing WebRTC connectivity issues.
+        // Unset by default so normal operation is silent; set_log_level()
+        // (exposed to Python) can also change this at any time.
+        const char *logLevelEnv = readEnvironmentVariable("FFL_DATACHANNEL_LOG_LEVEL");
+        if (logLevelEnv && *logLevelEnv) {
+            rtcLogLevel logLevel;
+            if (!parseLogLevelName(logLevelEnv, logLevel)) {
+                throw std::runtime_error(
+                    "FFL_DATACHANNEL_LOG_LEVEL must be one of: "
+                    "verbose, debug, info, warning, error, fatal, none"
+                );
+            }
+            setNativeLogLevel(logLevel);
         }
 
         rtcPreload();

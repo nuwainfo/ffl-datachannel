@@ -17,7 +17,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from ._native_backend import NativeError
+from ._native_backend import NativeError, set_log_level
 from .rtcconfiguration import RTCConfiguration, RTCIceServer
 from .rtcdatachannel import RTCDataChannel
 from .rtcpeerconnection import RTCPeerConnection
@@ -32,4 +32,5 @@ __all__ = [
     "RTCIceServer",
     "RTCPeerConnection",
     "RTCSessionDescription",
+    "set_log_level",
 ]

@@ -155,6 +155,7 @@ $wheelDirectory = Join-Path $outDirectory "wheel"
 $wheelExtractDirectory = Join-Path $outDirectory "wheel-extract"
 $libDataChannelCMake = Join-Path $root "third_party\libdatachannel\CMakeLists.txt"
 $libDataChannelPatch = Join-Path $root "patches\libdatachannel_partial_send.patch"
+$libDataChannelDiagnosticsPatch = Join-Path $root "patches\libdatachannel_gnutls_dtls_diagnostics.patch"
 
 Import-VSDeveloperEnvironment
 
@@ -171,6 +172,7 @@ if (-not (Test-Path $libDataChannelCMake)) {
 }
 
 Apply-DependencyPatch (Join-Path $root "third_party\libdatachannel") $libDataChannelPatch
+Apply-DependencyPatch (Join-Path $root "third_party\libdatachannel") $libDataChannelDiagnosticsPatch
 
 Write-Host "=== 2/5 Install wheel build requirements ==="
 & python -c "import build, scikit_build_core"

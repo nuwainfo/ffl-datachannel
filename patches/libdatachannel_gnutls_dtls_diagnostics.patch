@@ -1,8 +1,75 @@
 diff --git a/src/impl/dtlstransport.cpp b/src/impl/dtlstransport.cpp
-index 689eb06..441cfbc 100644
+index 689eb06..a23d4c5 100644
 --- a/src/impl/dtlstransport.cpp
 +++ b/src/impl/dtlstransport.cpp
-@@ -220,7 +220,14 @@ void DtlsTransport::doRecv() {
+@@ -14,6 +14,7 @@
+ 
+ #include <algorithm>
+ #include <chrono>
++#include <cerrno>
+ #include <cstring>
+ #include <exception>
+ 
+@@ -55,7 +56,7 @@ DtlsTransport::DtlsTransport(shared_ptr<IceTransport> lower, certificate_ptr cer
+                              verifier_callback verifierCallback, state_callback stateChangeCallback)
+     : Transport(lower, std::move(stateChangeCallback)), mMtu(mtu), mCertificate(certificate),
+       mFingerprintAlgorithm(fingerprintAlgorithm), mVerifierCallback(std::move(verifierCallback)),
+-      mIsClient(lower->role() == Description::Role::Active),
++      mIsClient(lower->role() == Description::Role::Active), mIceTransport(std::move(lower)),
+       mIncomingQueue(RECV_QUEUE_LIMIT, message_size_func) {
+ 
+ 	PLOG_DEBUG << "Initializing DTLS transport (GnuTLS)";
+@@ -95,6 +96,10 @@ DtlsTransport::DtlsTransport(shared_ptr<IceTransport> lower, certificate_ptr cer
+ 		gnutls_transport_set_ptr(mSession, this);
+ 		gnutls_transport_set_push_function(mSession, WriteCallback);
+ 		gnutls_transport_set_pull_function(mSession, ReadCallback);
++		// Keep errno retrieval in the callback's CRT/thread. In particular, do not
++		// use gnutls_transport_set_errno(): GnuTLS documents that its session-wide
++		// error slot is unreliable when this session sends and receives concurrently.
++		gnutls_transport_set_errno_function(mSession, ErrnoCallback);
+ 		gnutls_transport_set_pull_timeout_function(mSession, TimeoutCallback);
+ 
+ 	} catch (...) {
+@@ -139,10 +144,14 @@ bool DtlsTransport::send(message_ptr message) {
+ 
+ 	PLOG_VERBOSE << "Send size=" << message->size();
+ 
++	// A retry after GNUTLS_E_AGAIN must flush this exact record. Keep the
++	// session send lock until it is resolved so another caller cannot submit a
++	// different record between attempts.
++	std::lock_guard lock(mSendMutex);
++	mCurrentDscp = message->dscp;
++
+ 	ssize_t ret;
+ 	do {
+-		std::lock_guard lock(mSendMutex);
+-		mCurrentDscp = message->dscp;
+ 		ret = gnutls_record_send(mSession, message->data(), message->size());
+ 	} while (ret == GNUTLS_E_INTERRUPTED || ret == GNUTLS_E_AGAIN);
+ 
+@@ -166,14 +175,17 @@ void DtlsTransport::incoming(message_ptr message) {
+ 	enqueueRecv();
+ }
+ 
+-bool DtlsTransport::outgoing(message_ptr message) {
++TransportSendResult DtlsTransport::outgoingWithResult(message_ptr message) {
+ 	message->dscp = mCurrentDscp;
+-
+-	bool result = Transport::outgoing(std::move(message));
+-	mOutgoingResult = result;
++	auto result = mIceTransport->sendWithResult(std::move(message));
++	mOutgoingResult = result == TransportSendResult::Success;
+ 	return result;
+ }
+ 
++bool DtlsTransport::outgoing(message_ptr message) {
++	return outgoingWithResult(std::move(message)) == TransportSendResult::Success;
++}
++
+ bool DtlsTransport::demuxMessage(message_ptr) {
+ 	// Dummy
+ 	return false;
+@@ -220,7 +232,14 @@ void DtlsTransport::doRecv() {
  			// See https://www.rfc-editor.org/rfc/rfc8261.html#section-5
  			gnutls_dtls_set_mtu(mSession, bufferSize + 1);
  
@@ -18,7 +85,7 @@ index 689eb06..441cfbc 100644
  			changeState(State::Connected);
  			postHandshake();
  		}
-@@ -233,6 +240,16 @@ void DtlsTransport::doRecv() {
+@@ -233,6 +252,16 @@ void DtlsTransport::doRecv() {
  					return;
  				}
  
@@ -35,49 +102,212 @@ index 689eb06..441cfbc 100644
  				// RFC 8827: Implementations MUST NOT implement DTLS renegotiation and MUST reject
  				// it with a "no_renegotiation" alert if offered. See
  				// https://www.rfc-editor.org/rfc/rfc8827.html#section-6.5
-@@ -316,13 +333,19 @@ ssize_t DtlsTransport::WriteCallback(gnutls_transport_ptr_t ptr, const void *dat
+@@ -316,25 +345,38 @@ ssize_t DtlsTransport::WriteCallback(gnutls_transport_ptr_t ptr, const void *dat
  	try {
  		if (len > 0) {
  			auto b = reinterpret_cast<const byte *>(data);
 -			t->outgoing(make_message(b, b + len));
-+			if (!t->outgoing(make_message(b, b + len))) {
-+				// Transient backpressure (e.g. ICE send buffer full): let GnuTLS's
-+				// existing GNUTLS_E_AGAIN retry path handle it instead of reporting
-+				// the packet as sent.
-+				gnutls_transport_set_errno(t->mSession, EAGAIN);
++			switch (t->outgoingWithResult(make_message(b, b + len))) {
++			case TransportSendResult::Success:
++				break;
++			case TransportSendResult::Again:
++				errno = EAGAIN;
++				return -1;
++			case TransportSendResult::TooLarge:
++				errno = EMSGSIZE;
++				return -1;
++			case TransportSendResult::Failed:
++				errno = EIO;
 +				return -1;
 +			}
  		}
- 		gnutls_transport_set_errno(t->mSession, 0);
+-		gnutls_transport_set_errno(t->mSession, 0);
  		return ssize_t(len);
  
  	} catch (const std::exception &e) {
 -		PLOG_WARNING << e.what();
+-		gnutls_transport_set_errno(t->mSession, ECONNRESET);
 +		PLOG_ERROR << "DTLS push callback exception, len=" << len << ": " << e.what();
- 		gnutls_transport_set_errno(t->mSession, ECONNRESET);
++		errno = ECONNRESET;
  		return -1;
  	}
-@@ -353,7 +376,7 @@ ssize_t DtlsTransport::ReadCallback(gnutls_transport_ptr_t ptr, void *data, size
+ }
+ 
++int DtlsTransport::ErrnoCallback(gnutls_transport_ptr_t /* ptr */) { return errno; }
++
+ ssize_t DtlsTransport::ReadCallback(gnutls_transport_ptr_t ptr, void *data, size_t maxlen) {
+ 	DtlsTransport *t = static_cast<DtlsTransport *>(ptr);
+ 	try {
+ 		while (t->mIncomingQueue.running()) {
+ 			auto next = t->mIncomingQueue.pop();
+ 			if (!next) {
+-				gnutls_transport_set_errno(t->mSession, EAGAIN);
++				errno = EAGAIN;
+ 				return -1;
+ 			}
+ 
+@@ -344,17 +386,15 @@ ssize_t DtlsTransport::ReadCallback(gnutls_transport_ptr_t ptr, void *data, size
+ 
+ 			ssize_t len = std::min(maxlen, message->size());
+ 			std::memcpy(data, message->data(), len);
+-			gnutls_transport_set_errno(t->mSession, 0);
+ 			return len;
+ 		}
+ 
+ 		// Closed
+-		gnutls_transport_set_errno(t->mSession, 0);
  		return 0;
  
  	} catch (const std::exception &e) {
 -		PLOG_WARNING << e.what();
+-		gnutls_transport_set_errno(t->mSession, ECONNRESET);
 +		PLOG_ERROR << e.what();
- 		gnutls_transport_set_errno(t->mSession, ECONNRESET);
++		errno = ECONNRESET;
  		return -1;
  	}
-diff --git a/src/impl/tls.cpp b/src/impl/tls.cpp
-index 60dbb2c..7f4f0bc 100644
---- a/src/impl/tls.cpp
-+++ b/src/impl/tls.cpp
-@@ -21,7 +21,9 @@ bool check(int ret, const string &message) {
- 		if (!gnutls_error_is_fatal(ret)) {
- 			return false;
- 		}
--		throw std::runtime_error(message + ": " + gnutls_strerror(ret));
-+		throw std::runtime_error(message + ": " + gnutls_strerror(ret) + " (" +
-+		                          gnutls_strerror_name(ret) + ", code=" + std::to_string(ret) +
-+		                          ")");
- 	}
- 	return true;
  }
+@@ -383,7 +423,7 @@ DtlsTransport::DtlsTransport(shared_ptr<IceTransport> lower, certificate_ptr cer
+                              verifier_callback verifierCallback, state_callback stateChangeCallback)
+     : Transport(lower, std::move(stateChangeCallback)), mMtu(mtu), mCertificate(certificate),
+       mFingerprintAlgorithm(fingerprintAlgorithm), mVerifierCallback(std::move(verifierCallback)),
+-      mIsClient(lower->role() == Description::Role::Active),
++      mIsClient(lower->role() == Description::Role::Active), mIceTransport(std::move(lower)),
+       mIncomingQueue(RECV_QUEUE_LIMIT, message_size_func) {
+ 
+ 	PLOG_DEBUG << "Initializing DTLS transport (MbedTLS)";
+@@ -733,7 +773,7 @@ DtlsTransport::DtlsTransport(shared_ptr<IceTransport> lower, certificate_ptr cer
+                              verifier_callback verifierCallback, state_callback stateChangeCallback)
+     : Transport(lower, std::move(stateChangeCallback)), mMtu(mtu), mCertificate(certificate),
+       mFingerprintAlgorithm(fingerprintAlgorithm), mVerifierCallback(std::move(verifierCallback)),
+-      mIsClient(lower->role() == Description::Role::Active),
++      mIsClient(lower->role() == Description::Role::Active), mIceTransport(std::move(lower)),
+       mIncomingQueue(RECV_QUEUE_LIMIT, message_size_func) {
+ 
+ 	PLOG_DEBUG << "Initializing DTLS transport (OpenSSL)";
+diff --git a/src/impl/dtlstransport.hpp b/src/impl/dtlstransport.hpp
+index 10ef502..f79b5ca 100644
+--- a/src/impl/dtlstransport.hpp
++++ b/src/impl/dtlstransport.hpp
+@@ -45,6 +45,7 @@ public:
+ protected:
+ 	virtual void incoming(message_ptr message) override;
+ 	virtual bool outgoing(message_ptr message) override;
++	TransportSendResult outgoingWithResult(message_ptr message);
+ 	virtual bool demuxMessage(message_ptr message);
+ 	virtual void postHandshake();
+ 
+@@ -56,6 +57,7 @@ protected:
+ 	CertificateFingerprint::Algorithm mFingerprintAlgorithm;
+ 	const verifier_callback mVerifierCallback;
+ 	const bool mIsClient;
++	const shared_ptr<IceTransport> mIceTransport;
+ 
+ 	Queue<message_ptr> mIncomingQueue;
+ 	std::atomic<int> mPendingRecvCount = 0;
+@@ -69,6 +71,7 @@ protected:
+ 
+ 	static int CertificateCallback(gnutls_session_t session);
+ 	static ssize_t WriteCallback(gnutls_transport_ptr_t ptr, const void *data, size_t len);
++	static int ErrnoCallback(gnutls_transport_ptr_t ptr);
+ 	static ssize_t ReadCallback(gnutls_transport_ptr_t ptr, void *data, size_t maxlen);
+ 	static int TimeoutCallback(gnutls_transport_ptr_t ptr, unsigned int ms);
+ 
+diff --git a/src/impl/icetransport.cpp b/src/impl/icetransport.cpp
+index 5d77dfb..4264eb3 100644
+--- a/src/impl/icetransport.cpp
++++ b/src/impl/icetransport.cpp
+@@ -285,19 +285,38 @@ bool IceTransport::getSelectedCandidatePair(Candidate *local, Candidate *remote)
+ }
+ 
+ bool IceTransport::send(message_ptr message) {
++	return sendWithResult(std::move(message)) == TransportSendResult::Success;
++}
++
++TransportSendResult IceTransport::sendWithResult(message_ptr message) {
+ 	auto s = state();
+ 	if (!message || (s != State::Connected && s != State::Completed))
+-		return false;
++		return TransportSendResult::Failed;
+ 
+ 	PLOG_VERBOSE << "Send size=" << message->size();
+-	return outgoing(message);
++	return outgoingWithResult(std::move(message));
+ }
+ 
+-bool IceTransport::outgoing(message_ptr message) {
++TransportSendResult IceTransport::outgoingWithResult(message_ptr message) {
+ 	// Explicit Congestion Notification takes the least-significant 2 bits of the DS field
+ 	int ds = int(message->dscp << 2);
+-	return juice_send_diffserv(mAgent.get(), reinterpret_cast<const char *>(message->data()),
+-	                           message->size(), ds) >= 0;
++	const int ret = juice_send_diffserv(mAgent.get(), reinterpret_cast<const char *>(message->data()),
++	                                    message->size(), ds);
++	switch (ret) {
++	case JUICE_ERR_SUCCESS:
++		return TransportSendResult::Success;
++	case JUICE_ERR_AGAIN:
++		return TransportSendResult::Again;
++	case JUICE_ERR_TOO_LARGE:
++		return TransportSendResult::TooLarge;
++	default:
++		PLOG_ERROR << "ICE send failed, libjuice result=" << ret;
++		return TransportSendResult::Failed;
++	}
++}
++
++bool IceTransport::outgoing(message_ptr message) {
++	return outgoingWithResult(std::move(message)) == TransportSendResult::Success;
+ }
+ 
+ void IceTransport::changeGatheringState(GatheringState state) {
+@@ -799,12 +818,16 @@ optional<string> IceTransport::getRemoteAddress() const {
+ }
+ 
+ bool IceTransport::send(message_ptr message) {
++	return sendWithResult(std::move(message)) == TransportSendResult::Success;
++}
++
++TransportSendResult IceTransport::sendWithResult(message_ptr message) {
+ 	auto s = state();
+ 	if (!message || (s != State::Connected && s != State::Completed))
+-		return false;
++		return TransportSendResult::Failed;
+ 
+ 	PLOG_VERBOSE << "Send size=" << message->size();
+-	return outgoing(message);
++	return outgoing(message) ? TransportSendResult::Success : TransportSendResult::Failed;
+ }
+ 
+ bool IceTransport::outgoing(message_ptr message) {
+diff --git a/src/impl/icetransport.hpp b/src/impl/icetransport.hpp
+index 5d74aab..54b61ce 100644
+--- a/src/impl/icetransport.hpp
++++ b/src/impl/icetransport.hpp
+@@ -57,10 +57,12 @@ public:
+ 	optional<string> getRemoteAddress() const;
+ 
+ 	bool send(message_ptr message) override; // false if dropped
++	TransportSendResult sendWithResult(message_ptr message);
+ 
+ 	bool getSelectedCandidatePair(Candidate *local, Candidate *remote);
+ 
+ private:
++	TransportSendResult outgoingWithResult(message_ptr message);
+ 	bool outgoing(message_ptr message) override;
+ 
+ 	void changeGatheringState(GatheringState state);
+diff --git a/src/impl/transport.hpp b/src/impl/transport.hpp
+index c0f8861..c856731 100644
+--- a/src/impl/transport.hpp
++++ b/src/impl/transport.hpp
+@@ -22,6 +22,10 @@
+ 
+ namespace rtc::impl {
+ 
++// A lower transport may reject a datagram temporarily, reject it for its
++// size, or fail permanently. DTLS callbacks need that distinction.
++enum class TransportSendResult { Success, Again, TooLarge, Failed };
++
+ class Transport {
+ public:
+ 	enum class State { Disconnected, Connecting, Connected, Completed, Failed };

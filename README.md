@@ -38,6 +38,28 @@ channel.on("bufferedamountlow", on_buffer_low)
 form without the `candidate:` prefix. `addIceCandidate()` accepts candidates,
 FastFileLink-style candidate dictionaries, or `None` for end-of-candidates.
 
+## SCTP retransmit timeout
+
+`ffl_datachannel` defaults SCTP's minimum retransmit timeout to 1000ms
+(libdatachannel's own optimized default is ~200ms). On networks where
+round-trip variance regularly exceeds 200ms, that short timeout makes SCTP
+mistake ordinary delay for packet loss, collapsing the congestion window and
+stalling large transfers even though nothing was lost — a delivery-policy
+choice, not a fix to an SCTP/WebRTC algorithm bug. The default is applied in
+Python (`src/ffl_datachannel/_native_backend.py`, at import time via
+`os.environ.setdefault`) rather than hardcoded natively, so it can be
+adjusted without a rebuild. Override it with
+`FFL_DATACHANNEL_SCTP_MIN_RETRANSMIT_TIMEOUT_MS` (set it to `0` or negative
+to restore libdatachannel's own optimized default); it's read once, at first
+`RTCPeerConnection` construction.
+
+`FFL_DATACHANNEL_BIND_ADDRESS` optionally pins libjuice's ICE gathering to
+one local address — useful for constraining gathering to IPv4 or IPv6 while
+diagnosing a path-specific issue. It's opt-in and unset by default: don't set
+it globally to something like `0.0.0.0` as a standing workaround, since that
+excludes every IPv6 ICE candidate and would break direct connectivity on
+IPv6-only networks.
+
 ## Native logging
 
 `set_log_level(level)` configures libdatachannel's native logger (silent by

@@ -169,6 +169,14 @@ NativePeerConnection::NativePeerConnection(EventSink &sink, const std::vector<st
     config.iceServersCount = static_cast<int>(iceServerPointers.size());
     config.disableAutoNegotiation = true;
 
+    // Optional libjuice bind address.  Apart from allowing deployments to
+    // select a particular interface, this makes it possible to constrain
+    // ICE gathering to IPv4 or IPv6 when diagnosing a path-specific issue.
+    const char *configuredBindAddress = readEnvironmentVariable("FFL_DATACHANNEL_BIND_ADDRESS");
+    if (configuredBindAddress && *configuredBindAddress) {
+        config.bindAddress = configuredBindAddress;
+    }
+
     // Optional per-PeerConnection MTU override for benchmark parity tests.
     int configuredMtu = 0;
     if (readNonNegativeIntEnvironmentVariable("FFL_DATACHANNEL_MTU", configuredMtu)) {
@@ -223,12 +231,30 @@ void NativePeerConnection::ensureRuntimeReady() {
         //      <0 -> disable the max-burst limiter
         //      >0 -> explicit maximum burst in MTUs
         //
-        // This experiment intentionally does NOT change
-        // initialCongestionWindow or any other SCTP tuning knob.
+        // Other SCTP controls retain libdatachannel's optimized defaults.
         hasCustomSctpSettings |= readIntEnvironmentVariable(
             "FFL_DATACHANNEL_SCTP_MAX_BURST",
             sctpSettings.maxBurst
         );
+        hasCustomSctpSettings |= readNonNegativeIntEnvironmentVariable(
+            "FFL_DATACHANNEL_SCTP_MIN_RETRANSMIT_TIMEOUT_MS",
+            sctpSettings.minRetransmitTimeoutMs
+        );
+
+        if (readNonNegativeIntEnvironmentVariable(
+                "FFL_DATACHANNEL_SCTP_CONGESTION_CONTROL",
+                sctpSettings.congestionControlModule
+            )) {
+            // The pinned usrsctp build supports RFC2581 (0), HSTCP (1), and
+            // H-TCP (2). Reject unavailable values before runtime startup.
+            if (sctpSettings.congestionControlModule > 2) {
+                throw std::runtime_error(
+                    "FFL_DATACHANNEL_SCTP_CONGESTION_CONTROL must be 0 (RFC2581), "
+                    "1 (HSTCP), or 2 (H-TCP)"
+                );
+            }
+            hasCustomSctpSettings = true;
+        }
 
         if (hasCustomSctpSettings) {
             const int result = rtcSetSctpSettings(&sctpSettings);

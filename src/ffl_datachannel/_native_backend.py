@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from enum import IntEnum
 from typing import Any, Callable
@@ -30,6 +31,21 @@ except ImportError:
     # Some embedded builds expose the extension as a top-level CPython builtin
     # rather than as an installed ffl_datachannel submodule.
     import _ffl_datachannel as native
+
+# libdatachannel's optimized default minimum SCTP retransmit timeout is
+# ~200ms. On networks where round-trip variance regularly exceeds that, SCTP
+# repeatedly mistakes ordinary delay for packet loss, collapsing the
+# congestion window and stalling large transfers even though nothing was
+# actually lost. Default this to 1000ms for reliable large-file transfer over
+# such networks -- a delivery-policy choice, not a fix to an SCTP/WebRTC
+# algorithm bug. The default lives here (Python), not in the native layer, so
+# it can be changed without a native rebuild; setdefault() leaves an
+# already-set FFL_DATACHANNEL_SCTP_MIN_RETRANSMIT_TIMEOUT_MS untouched
+# (including a deployment that wants libdatachannel's own <= 0 "optimized
+# default" instead). The native layer reads it once, at first
+# RTCPeerConnection construction, so this must run before that -- i.e. here,
+# at ffl_datachannel import time, not lazily inside a function.
+os.environ.setdefault("FFL_DATACHANNEL_SCTP_MIN_RETRANSMIT_TIMEOUT_MS", "1000")
 
 
 class NativeEventType(IntEnum):

@@ -4,8 +4,13 @@
 the aiortc-compatible subset used by FastFileLink, backed by libdatachannel,
 libjuice, usrsctp, and GnuTLS. Native wheels always statically link
 libdatachannel, libjuice, and usrsctp; OpenSSL is not used. GnuTLS itself is
-statically linked (via vcpkg) only on Windows — Linux and macOS wheels link
-it dynamically against the host's system GnuTLS 3.8.x installation.
+statically linked (via vcpkg) on Windows. On macOS the extension links
+GnuTLS dynamically against Homebrew, but `delocate` bundles that dylib (and
+its own dependencies) into the wheel at build time and rewrites its load
+path, so the shipped wheel has no external GnuTLS dependency at runtime —
+the same pattern used by `ffl-p2p`. On Linux the same bundling happens only
+when building a manylinux-targeted wheel (via `auditwheel repair`); a plain
+native Linux build still depends on the build host's system GnuTLS.
 
 ## Compatibility scope
 
@@ -138,14 +143,20 @@ The macOS script accepts `ARCH` (default: `uname -m`) and respects
 `FFL_DATACHANNEL_GNUTLS_ROOT` to point at an alternate prefix (for example a
 Conda environment on Linux, or a non-default Homebrew prefix on macOS) when
 the default `pkg-config` search does not find it. Unlike the vendored
-transport libraries, GnuTLS is linked dynamically on these platforms, so the
-resulting wheel depends on the host's `libgnutls` at runtime.
+transport libraries, the extension itself still links GnuTLS dynamically on
+these platforms.
 
-On Linux, `auditwheel` is optional. If `MANYLINUX_PLAT`, `AUDITWHEEL_PLAT`, or
-the local auditwheel/glibc policy identifies a supported manylinux target, the
-script repairs the raw wheel for that policy (bundling the dynamic GnuTLS
-dependency). Otherwise it produces a native Linux wheel that depends on the
-build host's system GnuTLS.
+The macOS script always installs `delocate` and repairs the raw wheel with
+it, bundling `libgnutls` (and its own dependency closure) into the wheel and
+rewriting the load path — the shipped wheel does not depend on the target
+machine having Homebrew's GnuTLS installed. On Linux, `auditwheel` is
+optional: if `MANYLINUX_PLAT`, `AUDITWHEEL_PLAT`, or the local
+auditwheel/glibc policy identifies a supported manylinux target, the script
+repairs the raw wheel for that policy the same way (bundling GnuTLS).
+Otherwise it produces a native Linux wheel that depends on the build host's
+system GnuTLS at runtime — there is no Linux equivalent of delocate's
+"bundle for whatever this machine has" mode outside a manylinux/musllinux
+policy target.
 
 ## Test and validate
 
@@ -177,8 +188,12 @@ The browser suite drives Chrome and Firefox over localhost and checks a
 To inspect a wheel manually, use `ldd` on Linux, `otool -L` on macOS, or
 `dumpbin /DEPENDENTS` on Windows. None should report dynamic libdatachannel,
 libjuice, or usrsctp libraries. On Windows, GnuTLS and its closure (Nettle,
-GMP, libtasn1, zlib) must also be static; on Linux and macOS a dynamic
-GnuTLS dependency is expected.
+GMP, libtasn1, zlib) must also be static. On macOS and manylinux-repaired
+Linux wheels, GnuTLS is bundled inside the wheel (`.dylibs/libgnutls*.dylib`
+on macOS; a hash-suffixed `libgnutls*.so` on Linux) rather than statically
+linked, and the extension should reference neither a Homebrew path nor the
+build host's raw system `libgnutls`; a plain (non-manylinux) native Linux
+wheel still depends on the build host's system GnuTLS at runtime.
 
 ## FastFileLink integration checks
 

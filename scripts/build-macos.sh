@@ -22,6 +22,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="${PYTHON:-python3}"
 ARCH="${ARCH:-$(uname -m)}"
 OUT="$ROOT/out/native-macos"
+RAW_WHEEL="$OUT/raw-wheel"
 WHEEL_DIR="$OUT/wheel"
 WHEEL_EXTRACT="$OUT/wheel-extract"
 
@@ -59,12 +60,12 @@ fi
 apply_dependency_patch "$ROOT/patches/libdatachannel_partial_send.patch"
 apply_dependency_patch "$ROOT/patches/libdatachannel_gnutls_dtls_diagnostics.patch"
 
-if ! "$PYTHON" -c 'import build, scikit_build_core' >/dev/null 2>&1; then
-    "$PYTHON" -m pip install --disable-pip-version-check build scikit-build-core
+if ! "$PYTHON" -c 'import build, scikit_build_core, delocate' >/dev/null 2>&1; then
+    "$PYTHON" -m pip install --disable-pip-version-check build scikit-build-core delocate
 fi
 
-rm -rf "$WHEEL_DIR" "$WHEEL_EXTRACT"
-mkdir -p "$WHEEL_DIR"
+rm -rf "$RAW_WHEEL" "$WHEEL_DIR" "$WHEEL_EXTRACT"
+mkdir -p "$RAW_WHEEL" "$WHEEL_DIR"
 
 export ARCHFLAGS="-arch $ARCH"
 
@@ -103,18 +104,28 @@ if [[ -n "${MACOSX_DEPLOYMENT_TARGET:-}" ]]; then
     cmake_args+=("-DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET")
 fi
 
-# The build links GnuTLS dynamically here: Homebrew only ships a shared
-# libgnutls, and it owns its own transitive crypto dependencies (Nettle,
-# GMP, libtasn1). CMAKE_ARGS is consumed directly by scikit-build-core's
-# CMake invocation, which resolves GnuTLS itself via pkg-config using the
-# PKG_CONFIG_PATH exported above.
+# The extension itself still links GnuTLS dynamically here: Homebrew only
+# ships a shared libgnutls, and it owns its own transitive crypto
+# dependencies (Nettle, GMP, libtasn1). delocate below bundles that dylib
+# (and its own dependencies) into the wheel and rewrites the load path, so
+# the shipped wheel does not depend on the target machine having Homebrew's
+# GnuTLS installed -- the same pattern ffl-p2p uses. CMAKE_ARGS is consumed
+# directly by scikit-build-core's CMake invocation, which resolves GnuTLS
+# itself via pkg-config using the PKG_CONFIG_PATH exported above.
 export CMAKE_ARGS="${CMAKE_ARGS:+$CMAKE_ARGS }${cmake_args[*]}"
-"$PYTHON" -m build --wheel --no-isolation --outdir "$WHEEL_DIR" "$ROOT"
+"$PYTHON" -m build --wheel --no-isolation --outdir "$RAW_WHEEL" "$ROOT"
 
-wheels=("$WHEEL_DIR"/*.whl)
-[[ -f "${wheels[0]}" && ${#wheels[@]} -eq 1 ]] || { echo "Expected one final wheel." >&2; exit 1; }
+rawWheels=("$RAW_WHEEL"/*.whl)
+[[ -f "${rawWheels[0]}" && ${#rawWheels[@]} -eq 1 ]] || {
+    echo "Expected one raw wheel." >&2
+    exit 1
+}
+[[ "${rawWheels[0]}" != *-none-any.whl ]] || {
+    echo "The raw wheel is incorrectly tagged as pure Python." >&2
+    exit 1
+}
 
-"$PYTHON" - "$WHEEL_EXTRACT" "${wheels[0]}" <<'PY'
+"$PYTHON" - "$WHEEL_EXTRACT" "${rawWheels[0]}" <<'PY'
 import shutil
 import sys
 import zipfile
@@ -130,14 +141,51 @@ if len(extensions) != 1:
 print(extensions[0])
 PY
 
-extension="$(find "$WHEEL_EXTRACT/ffl_datachannel" -maxdepth 1 -name '_ffl_datachannel*.so' -print -quit)"
-dependencies="$(otool -L "$extension")"
-printf '%s\n' "$dependencies"
-if grep -Eiq '(libdatachannel|libjuice|libusrsctp)\.(dylib|so)' <<<"$dependencies"; then
+rawExtension="$(find "$WHEEL_EXTRACT/ffl_datachannel" -maxdepth 1 -type f -name '_ffl_datachannel*.so' -print -quit)"
+rawDependencies="$(otool -L "$rawExtension")"
+printf '%s\n' "$rawDependencies"
+if grep -Eiq '(libdatachannel|libjuice|libusrsctp)\.(dylib|so)' <<<"$rawDependencies"; then
     echo "The extension has dynamically linked vendored third-party dependencies." >&2
     exit 1
 fi
 # A dynamic Homebrew libgnutls dependency is expected here, unlike the
-# vendored libraries checked above, which must always stay statically linked.
+# vendored libraries checked above, which must always stay statically
+# linked. delocate below bundles it into the wheel.
+
+"$PYTHON" -m delocate.cmd.delocate_wheel -w "$WHEEL_DIR" "${rawWheels[0]}"
+
+wheels=("$WHEEL_DIR"/*.whl)
+[[ -f "${wheels[0]}" && ${#wheels[@]} -eq 1 ]] || { echo "Expected one repaired wheel." >&2; exit 1; }
+
+rm -rf "$WHEEL_EXTRACT"
+"$PYTHON" - "$WHEEL_EXTRACT" "${wheels[0]}" <<'PY'
+import shutil
+import sys
+import zipfile
+from pathlib import Path
+
+destination, wheel = map(Path, sys.argv[1:])
+shutil.rmtree(destination, ignore_errors=True)
+with zipfile.ZipFile(wheel) as archive:
+    archive.extractall(destination)
+
+extensions = list(destination.glob("ffl_datachannel/_ffl_datachannel*.so"))
+if len(extensions) != 1:
+    raise SystemExit(f"Expected one native extension in the final wheel, found {len(extensions)}")
+
+libraries = list(destination.glob("ffl_datachannel/.dylibs/libgnutls*.dylib"))
+if len(libraries) != 1:
+    raise SystemExit(f"Expected one bundled GnuTLS library, found {len(libraries)}")
+
+print(extensions[0])
+PY
+
+wheelExtension="$(find "$WHEEL_EXTRACT/ffl_datachannel" -maxdepth 1 -type f -name '_ffl_datachannel*.so' -print -quit)"
+wheelDependencies="$(otool -L "$wheelExtension")"
+printf '%s\n' "$wheelDependencies"
+if grep -Eq '/(opt/homebrew|usr/local)/(Cellar|opt)/' <<<"$wheelDependencies"; then
+    echo "The repaired wheel still references a Homebrew library path." >&2
+    exit 1
+fi
 
 echo "[PASS] Native macOS wheel build completed: ${wheels[0]}"

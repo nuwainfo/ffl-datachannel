@@ -100,19 +100,34 @@ if [[ -n "$GNUTLS_ROOT" && -f "$GNUTLS_ROOT/lib/pkgconfig/gnutls.pc" ]]; then
     echo "Using GnuTLS pkg-config metadata: $GNUTLS_ROOT/lib/pkgconfig/gnutls.pc"
 fi
 
-if ! pkg-config --atleast-version=3.8 gnutls; then
+if ! pkg-config --atleast-version=3.7 gnutls; then
     cat >&2 <<'EOF'
-ffl-datachannel requires GnuTLS 3.8.x or newer.
+ffl-datachannel requires GnuTLS 3.7.x or newer.
 Install a system GnuTLS development package (e.g. `apt install libgnutls28-dev`
 on Debian/Ubuntu), or install GnuTLS in the active Conda environment and rerun
 this command:
 
-  conda install -c conda-forge "gnutls>=3.8" pkg-config
+  conda install -c conda-forge "gnutls>=3.7" pkg-config
 
 Set FFL_DATACHANNEL_GNUTLS_ROOT=/path/to/prefix when the desired gnutls.pc is
-outside the active Conda environment.
+outside the active Conda environment. A manylinux-targeted build additionally
+needs that GnuTLS (and its own Nettle/GMP/libtasn1/p11-kit/libidn2 closure)
+to have itself been built against an old-enough glibc/libstdc++ for the
+target policy -- conda-forge's build is one such source; the system
+package manager's own GnuTLS usually is not.
 EOF
     exit 1
+fi
+
+cmake_args=()
+if [[ -n "$MANYLINUX" ]]; then
+    # auditwheel cannot lower a wheel's own GLIBCXX/CXXABI symbol versions;
+    # statically linking the GNU C++ runtime removes that dynamic dependency
+    # entirely. This does not by itself fix a too-new GnuTLS/Nettle/etc: that
+    # library must also have been built against an old-enough toolchain (see
+    # the message above) since bundling it via auditwheel repair does not
+    # change what it itself was compiled against.
+    cmake_args+=(-DFFL_DATACHANNEL_MANYLINUX=ON)
 fi
 
 # The build links GnuTLS dynamically here: system distributions only ship a
@@ -120,6 +135,9 @@ fi
 # (Nettle, GMP, libtasn1). CMAKE_ARGS is consumed directly by
 # scikit-build-core's CMake invocation, which resolves GnuTLS itself via
 # pkg-config using the PKG_CONFIG_PATH exported above.
+if [[ ${#cmake_args[@]} -gt 0 ]]; then
+    export CMAKE_ARGS="${CMAKE_ARGS:+$CMAKE_ARGS }${cmake_args[*]}"
+fi
 "$PYTHON" -m build --wheel --no-isolation --outdir "$RAW_WHEEL" "$ROOT"
 
 raw_wheels=("$RAW_WHEEL"/*.whl)

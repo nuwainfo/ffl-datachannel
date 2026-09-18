@@ -12,6 +12,8 @@ if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 endif()
 
+option(FFL_DATACHANNEL_MANYLINUX "Statically link the GNU C++ runtime for a manylinux wheel" OFF)
+
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
@@ -26,8 +28,15 @@ endif()
 # find_package(GnuTLS) runs so both this call and libdatachannel's own
 # find_package(GnuTLS REQUIRED) (invoked later, inside add_subdirectory)
 # resolve to the same installation instead of searching again.
+#
+# Floor is 3.7, not 3.8: ffl-datachannel uses no GnuTLS API newer than 3.7
+# (gnutls_session_get_desc, gnutls_strerror_name, etc. all predate it), and
+# some manylinux-compatible GnuTLS builds (e.g. the one ffl-p2p already
+# builds against) only carry symbols up to the GNUTLS_3_7_x tag even when
+# the release itself is newer. Windows is unaffected either way: vcpkg pins
+# an exact 3.8.7.
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(GNUTLS REQUIRED gnutls>=3.8)
+pkg_check_modules(GNUTLS REQUIRED gnutls>=3.7)
 find_path(FFL_DATACHANNEL_GNUTLS_INCLUDE_DIR gnutls/gnutls.h
     PATHS ${GNUTLS_INCLUDE_DIRS} NO_DEFAULT_PATH)
 find_library(FFL_DATACHANNEL_GNUTLS_LIBRARY NAMES gnutls
@@ -37,7 +46,7 @@ if(NOT FFL_DATACHANNEL_GNUTLS_INCLUDE_DIR OR NOT FFL_DATACHANNEL_GNUTLS_LIBRARY)
 endif()
 set(GNUTLS_INCLUDE_DIR "${FFL_DATACHANNEL_GNUTLS_INCLUDE_DIR}" CACHE PATH "" FORCE)
 set(GNUTLS_LIBRARY "${FFL_DATACHANNEL_GNUTLS_LIBRARY}" CACHE FILEPATH "" FORCE)
-find_package(GnuTLS 3.8 REQUIRED)
+find_package(GnuTLS 3.7 REQUIRED)
 
 if(WIN32)
     # vcpkg supplies a static GnuTLS on Windows. MSVC does not load a static
@@ -97,6 +106,17 @@ if(MSVC)
 else()
     target_compile_options(ffl_datachannel_native_core PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(_ffl_datachannel PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(FFL_DATACHANNEL_MANYLINUX)
+    if(MSVC)
+        message(FATAL_ERROR "FFL_DATACHANNEL_MANYLINUX requires a GNU-compatible Linux compiler")
+    endif()
+    # auditwheel cannot lower a wheel's own GLIBCXX/CXXABI symbol versions;
+    # the build host's libstdc++/libgcc are typically newer than a target
+    # manylinux policy allows. Static-linking the GNU C++ runtime removes
+    # that dynamic dependency entirely, matching ffl-p2p's own manylinux fix.
+    target_link_options(_ffl_datachannel PRIVATE -static-libgcc -static-libstdc++)
 endif()
 
 install(TARGETS _ffl_datachannel

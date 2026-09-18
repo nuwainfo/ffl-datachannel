@@ -88,10 +88,11 @@ safe to call repeatedly to change the level at runtime.
 ## Build native wheels
 
 Pinned dependencies are libdatachannel v0.24.5 and the libdatachannel-pinned
-libjuice, usrsctp, and plog submodules. GnuTLS 3.8.x is not vendored: Windows
-provisions a static build via vcpkg (see below), while Linux and macOS expect
-a system GnuTLS development package. All build scripts fetch missing sources
-and verify that the final extension does not dynamically link to the vendored
+libjuice, usrsctp, and plog submodules. GnuTLS (3.7.x or newer; ffl-datachannel
+uses no GnuTLS API newer than 3.7) is not vendored: Windows provisions a
+static build via vcpkg (see below), while Linux and macOS expect a system
+GnuTLS development package. All build scripts fetch missing sources and
+verify that the final extension does not dynamically link to the vendored
 transport libraries (libdatachannel, libjuice, usrsctp).
 
 ### Windows
@@ -119,7 +120,7 @@ have already provisioned that toolchain and pass its `pkgconf.exe` via
 
 ### Linux and macOS
 
-Install a GnuTLS 3.8.x (or newer) development package first:
+Install a GnuTLS 3.7.x (or newer) development package first:
 
 ```bash
 # Debian/Ubuntu
@@ -157,6 +158,26 @@ Otherwise it produces a native Linux wheel that depends on the build host's
 system GnuTLS at runtime — there is no Linux equivalent of delocate's
 "bundle for whatever this machine has" mode outside a manylinux/musllinux
 policy target.
+
+For a manylinux target, two independent things must both hold, or
+`auditwheel repair` refuses (it cannot lower already-compiled symbol
+versions, only bundle libraries):
+
+1. **The extension's own C++ runtime.** A build host's `libstdc++`/`libgcc`
+   are usually newer than an older manylinux policy allows. `build-linux.sh`
+   passes `-DFFL_DATACHANNEL_MANYLINUX=ON` when a manylinux target is
+   detected, which statically links them (`-static-libgcc -static-libstdc++`,
+   matching `ffl-p2p`'s own fix for the same problem) so there's no dynamic
+   dependency on them at all.
+2. **The system GnuTLS (and its own Nettle/GMP/libtasn1/p11-kit/libidn2
+   closure) being bundled.** Bundling copies whatever that library was
+   compiled against; if the build host's package (e.g. a recent
+   distro's `apt` package) was itself built with a newer glibc/libstdc++
+   than the target policy, the bundled copy still carries that requirement.
+   `conda-forge`'s GnuTLS package is one known-working source (it targets an
+   intentionally old, broadly-compatible toolchain) — point
+   `FFL_DATACHANNEL_GNUTLS_ROOT` (or `CONDA_PREFIX`, detected automatically)
+   at that environment.
 
 ## Test and validate
 

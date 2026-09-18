@@ -82,9 +82,9 @@ for pkgConfigDirectory in "$GNUTLS_ROOT/lib/pkgconfig" "$GNUTLS_ROOT/share/pkgco
     fi
 done
 
-if ! pkg-config --atleast-version=3.8 gnutls; then
+if ! pkg-config --atleast-version=3.7 gnutls; then
     cat >&2 <<'EOF'
-ffl-datachannel requires GnuTLS 3.8.x or newer.
+ffl-datachannel requires GnuTLS 3.7.x or newer.
 
 Install the macOS prerequisites and rerun the build:
 

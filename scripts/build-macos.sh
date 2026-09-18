@@ -19,12 +19,25 @@
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON="${PYTHON:-python3}"
+# Homebrew's own Python only provides `python3`, never a bare `python`
+# (by longstanding Homebrew policy, to avoid shadowing the system python).
+# A Conda env puts both on PATH ahead of Homebrew's. Preferring bare
+# `python` when present -- matching ffl-p2p's own resolution -- means an
+# active Conda env is picked up unambiguously instead of potentially
+# falling through to Homebrew's PEP-668-restricted python3.
+if [[ -n "${PYTHON:-}" ]]; then
+    PYTHON="$PYTHON"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON=python
+else
+    PYTHON=python3
+fi
 ARCH="${ARCH:-$(uname -m)}"
 OUT="$ROOT/out/native-macos"
 RAW_WHEEL="$OUT/raw-wheel"
 WHEEL_DIR="$OUT/wheel"
 WHEEL_EXTRACT="$OUT/wheel-extract"
+TOOLS_VENV="$OUT/build-tools"
 
 for command in cmake git otool pkg-config "$PYTHON"; do
     command -v "$command" >/dev/null 2>&1 || {
@@ -60,8 +73,23 @@ fi
 apply_dependency_patch "$ROOT/patches/libdatachannel_partial_send.patch"
 apply_dependency_patch "$ROOT/patches/libdatachannel_gnutls_dtls_diagnostics.patch"
 
+# Homebrew's Python enforces PEP 668 (externally-managed-environment) and
+# refuses a direct `pip install`. Use an isolated build-tools venv instead
+# of --break-system-packages, matching ffl-p2p's own fix for the same
+# error. The native extension itself is still built against $PYTHON (via
+# CMake's own Python discovery), not the venv -- a venv has no separate
+# Python.h/libpython of its own, so this does not change what the compiled
+# extension links against.
+BUILD_PYTHON="$PYTHON"
 if ! "$PYTHON" -c 'import build, scikit_build_core, delocate' >/dev/null 2>&1; then
-    "$PYTHON" -m pip install --disable-pip-version-check build scikit-build-core delocate
+    "$PYTHON" -m venv "$TOOLS_VENV" || {
+        echo "Unable to create a build-tools virtual environment with $PYTHON." >&2
+        exit 1
+    }
+
+    BUILD_PYTHON="$TOOLS_VENV/bin/python"
+    "$BUILD_PYTHON" -m pip install --disable-pip-version-check \
+        build scikit-build-core delocate
 fi
 
 rm -rf "$RAW_WHEEL" "$WHEEL_DIR" "$WHEEL_EXTRACT"
@@ -113,7 +141,7 @@ fi
 # directly by scikit-build-core's CMake invocation, which resolves GnuTLS
 # itself via pkg-config using the PKG_CONFIG_PATH exported above.
 export CMAKE_ARGS="${CMAKE_ARGS:+$CMAKE_ARGS }${cmake_args[*]}"
-"$PYTHON" -m build --wheel --no-isolation --outdir "$RAW_WHEEL" "$ROOT"
+"$BUILD_PYTHON" -m build --wheel --no-isolation --outdir "$RAW_WHEEL" "$ROOT"
 
 rawWheels=("$RAW_WHEEL"/*.whl)
 [[ -f "${rawWheels[0]}" && ${#rawWheels[@]} -eq 1 ]] || {
@@ -152,7 +180,7 @@ fi
 # vendored libraries checked above, which must always stay statically
 # linked. delocate below bundles it into the wheel.
 
-"$PYTHON" -m delocate.cmd.delocate_wheel -w "$WHEEL_DIR" "${rawWheels[0]}"
+"$BUILD_PYTHON" -m delocate.cmd.delocate_wheel -w "$WHEEL_DIR" "${rawWheels[0]}"
 
 wheels=("$WHEEL_DIR"/*.whl)
 [[ -f "${wheels[0]}" && ${#wheels[@]} -eq 1 ]] || { echo "Expected one repaired wheel." >&2; exit 1; }

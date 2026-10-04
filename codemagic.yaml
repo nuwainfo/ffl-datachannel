@@ -187,6 +187,21 @@ workflows:
           export MACOSX_DEPLOYMENT_TARGET="15.0"
           export FFL_DATACHANNEL_GNUTLS_ROOT="$X86_ENV"
 
+          # Conda's macOS libraries use @rpath install names.  delocate resolves
+          # @rpath dependencies from DYLD_LIBRARY_PATH / DYLD_FALLBACK_LIBRARY_PATH.
+          # Point both at the x86_64 Conda prefix so it can find and bundle
+          # libgnutls and its dependency closure (and the Conda libc++ selected
+          # by the linker) into the repaired wheel.
+          export DYLD_LIBRARY_PATH="$X86_ENV/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          export DYLD_FALLBACK_LIBRARY_PATH="$X86_ENV/lib:/usr/lib${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
+
+          echo "=== x86_64 dylib search path for delocate ==="
+          echo "DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH"
+          test -e "$X86_ENV/lib/libgnutls.30.dylib"
+          test -e "$X86_ENV/lib/libc++.1.dylib"
+          file "$X86_ENV/lib/libgnutls.30.dylib"
+          file "$X86_ENV/lib/libc++.1.dylib"
+
           rm -rf out/native-macos
 
           echo "=== x86_64 process check ==="

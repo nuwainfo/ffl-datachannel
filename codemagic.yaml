@@ -150,8 +150,12 @@ workflows:
 
           if [ ! -x /usr/local/bin/brew ]; then
             echo "=== Install Intel Homebrew in /usr/local ==="
-            NONINTERACTIVE=1 arch -x86_64 /bin/bash -c \
-              '$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)'
+            curl -fsSL \
+              https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh \
+              -o /tmp/install-homebrew-x86.sh
+
+            NONINTERACTIVE=1 arch -x86_64 /bin/bash /tmp/install-homebrew-x86.sh
+            rm -f /tmp/install-homebrew-x86.sh
           fi
 
           export HOMEBREW_NO_AUTO_UPDATE=1

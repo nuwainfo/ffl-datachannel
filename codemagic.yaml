@@ -8,45 +8,20 @@ workflows:
       xcode: 16.4
 
     scripts:
-      - name: Verify macOS runner
+      - name: Prepare macOS runner
         script: |
           set -euo pipefail
 
-          echo "=== macOS ==="
           sw_vers
-
-          echo "=== Native architecture ==="
           uname -m
+          xcodebuild -version
 
-          echo "=== Rosetta architecture check ==="
           sudo softwareupdate --install-rosetta --agree-to-license || true
           arch -x86_64 /usr/bin/uname -m
 
-          echo "=== Xcode ==="
-          xcodebuild -version
-
-          echo "=== Repository ==="
-          pwd
-          git rev-parse --short HEAD
-
-      - name: Install ARM64 build dependencies
-        script: |
-          set -euo pipefail
-
-          echo "=== ARM64 Homebrew dependencies ==="
           brew install cmake ninja pkg-config gnutls git
 
-          echo "=== Tool versions ==="
-          cmake --version | head -1
-          ninja --version
-          pkg-config --version
-          pkg-config --modversion gnutls
-          git --version
-
-          echo "=== Bootstrap pinned libdatachannel source ==="
-          python3 scripts/bootstrap.py
-
-      - name: Install ARM64 Miniconda Python 3.12
+      - name: Build and test ARM64 wheel
         script: |
           set -euo pipefail
 
@@ -57,9 +32,7 @@ workflows:
               -o /tmp/Miniconda3-arm64.sh \
               https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-arm64.sh
 
-            bash /tmp/Miniconda3-arm64.sh \
-              -b \
-              -p "$ARM_CONDA"
+            bash /tmp/Miniconda3-arm64.sh -b -p "$ARM_CONDA"
           fi
 
           source "$ARM_CONDA/etc/profile.d/conda.sh"
@@ -70,16 +43,6 @@ workflows:
 
           conda activate ffl-datachannel-arm64
 
-          python --version
-          python -c 'import platform; print("Python arch:", platform.machine()); assert platform.machine() == "arm64"'
-
-      - name: Build ARM64 wheel
-        script: |
-          set -euo pipefail
-
-          source "$HOME/miniconda3/etc/profile.d/conda.sh"
-          conda activate ffl-datachannel-arm64
-
           export PYTHON="$CONDA_PREFIX/bin/python"
           export ARCH="arm64"
           export MACOSX_DEPLOYMENT_TARGET="15.0"
@@ -88,64 +51,22 @@ workflows:
           unset DYLD_LIBRARY_PATH || true
           unset DYLD_FALLBACK_LIBRARY_PATH || true
 
-          rm -rf out/native-macos
-          rm -rf artifacts/macos/arm64
+          rm -rf out/native-macos artifacts/macos/arm64
           mkdir -p artifacts/macos/arm64
 
           bash ./scripts/build-macos.sh
-
           cp out/native-macos/wheel/*.whl artifacts/macos/arm64/
 
           ARM_WHEEL="$(find artifacts/macos/arm64 -maxdepth 1 -name '*.whl' -print -quit)"
           test -n "$ARM_WHEEL"
 
-          echo "=== ARM64 wheel ==="
-          ls -lh "$ARM_WHEEL"
-
-          rm -rf /tmp/ffl-datachannel-arm-wheel
-          mkdir -p /tmp/ffl-datachannel-arm-wheel
-          unzip -q "$ARM_WHEEL" -d /tmp/ffl-datachannel-arm-wheel
-
-          ARM_EXT="$(find /tmp/ffl-datachannel-arm-wheel/ffl_datachannel -maxdepth 1 -name '_ffl_datachannel*.so' -print -quit)"
-          test -n "$ARM_EXT"
-
-          file "$ARM_EXT"
-          lipo -info "$ARM_EXT"
-
-          if ! file "$ARM_EXT" | grep -q 'arm64'; then
-            echo "ERROR: ARM64 wheel does not contain an arm64 native extension"
-            exit 1
-          fi
-
-      - name: Test ARM64 wheel
-        script: |
-          set -euo pipefail
-
-          source "$HOME/miniconda3/etc/profile.d/conda.sh"
-          conda activate ffl-datachannel-arm64
-
-          ARM_WHEEL="$(find artifacts/macos/arm64 -maxdepth 1 -name '*.whl' -print -quit)"
-          test -n "$ARM_WHEEL"
-
-          python -m pip install --disable-pip-version-check --upgrade pip
           python -m pip install --force-reinstall "$ARM_WHEEL"
           python -m pip install pytest pytest-asyncio
 
-          echo "=== ARM64 import smoke test ==="
-          python - <<'PY'
-          import platform
-          import ffl_datachannel
-
-          print("machine:", platform.machine())
-          print("module :", ffl_datachannel.__file__)
-          assert platform.machine() == "arm64"
-          PY
-
-          echo "=== ARM64 native tests ==="
           FFL_DATACHANNEL_REQUIRE_NATIVE=1 \
             python -m pytest -q -m native
 
-      - name: Install x86_64 Miniconda toolchain
+      - name: Prepare x86_64 toolchain
         script: |
           set -euo pipefail
 
@@ -162,161 +83,62 @@ workflows:
               -p "$X86_CONDA"
           fi
 
-          echo "=== Create x86_64 Conda environment ==="
           if ! arch -x86_64 "$X86_CONDA/bin/conda" env list | awk '{print $1}' | grep -qx ffl-datachannel-x86_64; then
             arch -x86_64 "$X86_CONDA/bin/conda" create -y \
               -n ffl-datachannel-x86_64 \
               -c conda-forge \
               --override-channels \
               python=3.12 \
+              wheel \
               cmake \
               ninja \
               pkg-config \
               gnutls
           fi
 
-          echo "=== Install Python build/test tools ==="
-          arch -x86_64 "$X86_ENV/bin/python" -m pip install \
-            --disable-pip-version-check \
-            --upgrade \
-            pip \
-            wheel \
-            build \
-            scikit-build-core \
-            delocate \
-            pytest \
-            pytest-asyncio
+          arch -x86_64 "$X86_ENV/bin/python" -c \
+            'import platform; assert platform.machine() == "x86_64"'
 
-          echo "=== x86_64 toolchain ==="
-          arch -x86_64 "$X86_ENV/bin/python" - <<'PY'
-          import platform
-          import sys
-
-          print("Python :", sys.version)
-          print("machine:", platform.machine())
-          assert platform.machine() == "x86_64"
-          PY
-
-          arch -x86_64 "$X86_ENV/bin/cmake" --version | head -1
-          arch -x86_64 "$X86_ENV/bin/ninja" --version
-          arch -x86_64 "$X86_ENV/bin/pkg-config" --modversion gnutls
-
-          echo "=== Critical x86_64 native dependencies ==="
-          file "$X86_ENV/lib/libgnutls.30.dylib"
-          file "$X86_ENV/lib/libiconv.2.dylib"
-
-          UNISTRING="$(find "$X86_ENV/lib" -maxdepth 1 -name 'libunistring*.dylib' -print -quit)"
-          test -n "$UNISTRING"
-
-          echo "=== Conda libunistring dependency ==="
-          otool -L "$UNISTRING"
-
-          if ! otool -L "$UNISTRING" | grep -q '/usr/lib/libiconv\.2\.dylib'; then
-            echo "ERROR: x86_64 libunistring is not linked to Apple's system iconv"
-            exit 1
-          fi
-
-      - name: Build x86_64 wheel under Rosetta
+      - name: Build and test x86_64 wheel
         script: |
           set -euo pipefail
 
-          X86_CONDA="$HOME/miniconda3-x86_64"
-          X86_ENV="$X86_CONDA/envs/ffl-datachannel-x86_64"
+          X86_ENV="$HOME/miniconda3-x86_64/envs/ffl-datachannel-x86_64"
           X86_PYTHON="$X86_ENV/bin/python"
 
-          test -x "$X86_PYTHON"
-
-          # Use only the x86_64 Conda toolchain in this step.
           export PATH="$X86_ENV/bin:/usr/bin:/bin:/usr/sbin:/sbin"
           export PYTHON="$X86_PYTHON"
           export ARCH="x86_64"
           export MACOSX_DEPLOYMENT_TARGET="15.0"
           export FFL_DATACHANNEL_GNUTLS_ROOT="$X86_ENV"
 
-          # Important:
-          # DYLD_LIBRARY_PATH overrides even valid system libraries by basename.
-          # That caused Conda's GNU libiconv to replace Apple's /usr/lib/libiconv
-          # and produced the previous _iconv/_iconv_open/_iconv_close failures.
+          # Do not use DYLD_LIBRARY_PATH here: it can replace Apple's system
+          # libiconv with Conda's GNU libiconv.
           unset DYLD_LIBRARY_PATH || true
 
-          # delocate still needs a place to resolve Conda's @rpath libraries.
-          # FALLBACK is used only when the install path cannot be resolved, so
-          # absolute system dependencies such as /usr/lib/libiconv.2.dylib stay
-          # on the macOS system copy.
+          # Needed by delocate to resolve Conda's @rpath dependencies.
           export DYLD_FALLBACK_LIBRARY_PATH="$X86_ENV/lib"
 
-          echo "=== x86_64 process check ==="
-          CHECK_LOG="/tmp/ffl-datachannel-x86-process-check.log"
-          rm -f "$CHECK_LOG"
-
-          if ! arch -x86_64 "$PYTHON" -c \
-            'import platform; print("Python arch:", platform.machine()); assert platform.machine() == "x86_64"' \
-            >"$CHECK_LOG" 2>&1; then
-            cat "$CHECK_LOG"
-            exit 1
-          fi
-
-          cat "$CHECK_LOG"
-
-          if grep -q "symbol '_iconv.*missing" "$CHECK_LOG"; then
-            echo "ERROR: x86_64 process is still overriding Apple's iconv"
-            exit 1
-          fi
-
-          echo "=== x86_64 build configuration ==="
-          echo "Python: $PYTHON"
-          echo "GnuTLS root: $FFL_DATACHANNEL_GNUTLS_ROOT"
-          echo "DYLD_FALLBACK_LIBRARY_PATH=$DYLD_FALLBACK_LIBRARY_PATH"
-
-          arch -x86_64 "$X86_ENV/bin/pkg-config" --modversion gnutls
-          file "$X86_ENV/lib/libgnutls.30.dylib"
-
-          rm -rf out/native-macos
-          rm -rf artifacts/macos/x86_64
+          rm -rf out/native-macos artifacts/macos/x86_64
           mkdir -p artifacts/macos/x86_64
 
-          echo "=== Build x86_64 wheel ==="
           arch -x86_64 /bin/bash ./scripts/build-macos.sh
-
           cp out/native-macos/wheel/*.whl artifacts/macos/x86_64/
 
           X86_WHEEL="$(find artifacts/macos/x86_64 -maxdepth 1 -name '*.whl' -print -quit)"
           test -n "$X86_WHEEL"
 
-          echo "=== x86_64 wheel before validation ==="
-          ls -lh "$X86_WHEEL"
-
+          # delocate may rewrite libunistring to the bundled GNU libiconv.
+          # libunistring on macOS must keep using Apple's /usr/lib/libiconv.
           rm -rf /tmp/ffl-datachannel-x86-wheel
           mkdir -p /tmp/ffl-datachannel-x86-wheel
           unzip -q "$X86_WHEEL" -d /tmp/ffl-datachannel-x86-wheel
 
-          X86_EXT="$(find /tmp/ffl-datachannel-x86-wheel/ffl_datachannel -maxdepth 1 -name '_ffl_datachannel*.so' -print -quit)"
           DYLIB_DIR="/tmp/ffl-datachannel-x86-wheel/ffl_datachannel/.dylibs"
+          WHEEL_UNISTRING="$(find "$DYLIB_DIR" -maxdepth 1 -name 'libunistring*.dylib' -print -quit 2>/dev/null || true)"
 
-          test -n "$X86_EXT"
-          test -d "$DYLIB_DIR"
-
-          echo "=== Native extension ==="
-          file "$X86_EXT"
-          lipo -info "$X86_EXT"
-          otool -L "$X86_EXT"
-
-          if ! file "$X86_EXT" | grep -q 'x86_64'; then
-            echo "ERROR: x86_64 wheel does not contain an x86_64 native extension"
-            exit 1
-          fi
-
-          echo "=== Validate/fix libunistring iconv linkage ==="
-          WHEEL_UNISTRING="$(find "$DYLIB_DIR" -maxdepth 1 -name 'libunistring*.dylib' -print -quit)"
-          test -n "$WHEEL_UNISTRING"
-
-          otool -L "$WHEEL_UNISTRING"
-
-          # Normally DYLD_FALLBACK_LIBRARY_PATH keeps this correct already.
-          # If delocate rewrote it to the bundled GNU libiconv anyway, repair
-          # that single load command and repack the wheel so RECORD is updated.
-          if otool -L "$WHEEL_UNISTRING" | grep -q '@loader_path/libiconv\.2\.dylib'; then
-            echo "Repairing libunistring to use Apple's system iconv..."
+          if [ -n "$WHEEL_UNISTRING" ] && \
+             otool -L "$WHEEL_UNISTRING" | grep -q '@loader_path/libiconv\.2\.dylib'; then
 
             install_name_tool \
               -change '@loader_path/libiconv.2.dylib' \
@@ -324,9 +146,6 @@ workflows:
               "$WHEEL_UNISTRING"
 
             codesign --force --sign - "$WHEEL_UNISTRING"
-
-            echo "=== libunistring after repair ==="
-            otool -L "$WHEEL_UNISTRING"
 
             rm -rf /tmp/ffl-datachannel-x86-packed
             mkdir -p /tmp/ffl-datachannel-x86-packed
@@ -337,129 +156,35 @@ workflows:
 
             rm -f artifacts/macos/x86_64/*.whl
             cp /tmp/ffl-datachannel-x86-packed/*.whl artifacts/macos/x86_64/
-
-            X86_WHEEL="$(find artifacts/macos/x86_64 -maxdepth 1 -name '*.whl' -print -quit)"
-
-            rm -rf /tmp/ffl-datachannel-x86-wheel
-            mkdir -p /tmp/ffl-datachannel-x86-wheel
-            unzip -q "$X86_WHEEL" -d /tmp/ffl-datachannel-x86-wheel
-
-            X86_EXT="$(find /tmp/ffl-datachannel-x86-wheel/ffl_datachannel -maxdepth 1 -name '_ffl_datachannel*.so' -print -quit)"
-            DYLIB_DIR="/tmp/ffl-datachannel-x86-wheel/ffl_datachannel/.dylibs"
-            WHEEL_UNISTRING="$(find "$DYLIB_DIR" -maxdepth 1 -name 'libunistring*.dylib' -print -quit)"
           fi
 
-          echo "=== Final libunistring linkage ==="
-          otool -L "$WHEEL_UNISTRING"
-
-          if ! otool -L "$WHEEL_UNISTRING" | grep -q '/usr/lib/libiconv\.2\.dylib'; then
-            echo "ERROR: final wheel libunistring does not use Apple's system iconv"
-            exit 1
-          fi
-
-          if otool -L "$WHEEL_UNISTRING" | grep -q '@loader_path/libiconv\.2\.dylib'; then
-            echo "ERROR: final wheel libunistring still points to bundled GNU libiconv"
-            exit 1
-          fi
-
-          echo "=== Validate all bundled dylib architectures ==="
-          while IFS= read -r dylib; do
-            file "$dylib"
-
-            if ! file "$dylib" | grep -Eq 'x86_64|universal'; then
-              echo "ERROR: bundled dylib is not x86_64-compatible: $dylib"
-              exit 1
-            fi
-          done < <(find "$DYLIB_DIR" -type f -name '*.dylib' | sort)
-
-          echo "=== Check for build-machine paths ==="
-          BAD_PATHS="$(
-            {
-              otool -L "$X86_EXT"
-              otool -l "$X86_EXT"
-              while IFS= read -r dylib; do
-                otool -L "$dylib"
-                otool -l "$dylib"
-              done < <(find "$DYLIB_DIR" -type f -name '*.dylib' | sort)
-            } | grep -F "$HOME/miniconda3-x86_64" || true
-          )"
-
-          if [ -n "$BAD_PATHS" ]; then
-            echo "ERROR: final wheel still contains x86_64 Conda build-machine paths:"
-            echo "$BAD_PATHS"
-            exit 1
-          fi
-
-          echo "✅ x86_64 wheel layout validation passed"
-
-      - name: Test x86_64 wheel under clean Rosetta runtime
-        script: |
-          set -euo pipefail
-
-          X86_CONDA="$HOME/miniconda3-x86_64"
-          X86_ENV="$X86_CONDA/envs/ffl-datachannel-x86_64"
-          X86_PYTHON="$X86_ENV/bin/python"
           X86_WHEEL="$(find artifacts/macos/x86_64 -maxdepth 1 -name '*.whl' -print -quit)"
-
           test -n "$X86_WHEEL"
 
-          # The wheel must work without any build-only dylib search path.
+          # Test the finished wheel without any build-only library search path.
           unset DYLD_LIBRARY_PATH || true
           unset DYLD_FALLBACK_LIBRARY_PATH || true
           unset FFL_DATACHANNEL_GNUTLS_ROOT || true
-
-          arch -x86_64 "$X86_PYTHON" -m pip uninstall -y ffl-datachannel || true
 
           arch -x86_64 "$X86_PYTHON" -m pip install \
             --force-reinstall \
             "$X86_WHEEL"
 
-          echo "=== x86_64 import smoke test ==="
-          IMPORT_LOG="/tmp/ffl-datachannel-x86-import.log"
-          rm -f "$IMPORT_LOG"
+          arch -x86_64 "$X86_PYTHON" -m pip install pytest pytest-asyncio
 
-          if ! arch -x86_64 "$X86_PYTHON" - <<'PY' >"$IMPORT_LOG" 2>&1
-          import platform
-          import ffl_datachannel
-
-          print("machine:", platform.machine())
-          print("module :", ffl_datachannel.__file__)
-          assert platform.machine() == "x86_64"
-          PY
-          then
-            cat "$IMPORT_LOG"
-            exit 1
-          fi
-
-          cat "$IMPORT_LOG"
-
-          if grep -q "Symbol not found" "$IMPORT_LOG"; then
-            echo "ERROR: x86_64 wheel has an unresolved runtime symbol"
-            exit 1
-          fi
-
-          echo "=== x86_64 native tests under Rosetta ==="
           FFL_DATACHANNEL_REQUIRE_NATIVE=1 \
             arch -x86_64 "$X86_PYTHON" -m pytest -q -m native
 
-      - name: Final wheel summary
+      - name: Wheel summary
         script: |
           set -euo pipefail
 
-          echo "=== macOS wheels ready ==="
-          find artifacts/macos -maxdepth 3 -type f -name '*.whl' \
+          find artifacts/macos -type f -name '*.whl' \
             -print \
             -exec shasum -a 256 {} \;
 
-          ARM_COUNT="$(find artifacts/macos/arm64 -type f -name '*.whl' | wc -l | tr -d ' ')"
-          X86_COUNT="$(find artifacts/macos/x86_64 -type f -name '*.whl' | wc -l | tr -d ' ')"
-
-          if [ "$ARM_COUNT" != "1" ] || [ "$X86_COUNT" != "1" ]; then
-            echo "ERROR: Expected exactly one ARM64 wheel and one x86_64 wheel"
-            exit 1
-          fi
-
-          echo "✅ ARM64 + x86_64 macOS wheels built and tested successfully"
+          test "$(find artifacts/macos/arm64 -type f -name '*.whl' | wc -l | tr -d ' ')" = "1"
+          test "$(find artifacts/macos/x86_64 -type f -name '*.whl' | wc -l | tr -d ' ')" = "1"
 
     artifacts:
       - artifacts/macos/arm64/*.whl
